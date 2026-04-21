@@ -1,0 +1,57 @@
+package tui
+
+import (
+	"fmt"
+	"reflect"
+	"strings"
+
+	"github.com/bwagner5/go-cli-template/pkg/registry"
+	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
+)
+
+// summarize produces a one-line representation of an item using the resource's table fields.
+func summarize(res *registry.Resource, item any) string {
+	rv := reflect.Indirect(reflect.ValueOf(item))
+	var parts []string
+	for _, f := range res.Fields {
+		if f.Table.Header == "" {
+			continue
+		}
+		parts = append(parts, read(rv, f))
+	}
+	return strings.Join(parts, "  ")
+}
+
+// detailFor renders a full field-by-field view of an item.
+func detailFor(res *registry.Resource, item any) string {
+	rv := reflect.Indirect(reflect.ValueOf(item))
+	var s strings.Builder
+	for _, f := range res.Fields {
+		name := f.Flag
+		if f.Table.Header != "" {
+			name = f.Table.Header
+		}
+		val := read(rv, f)
+		if f.Sensitive {
+			val = strings.Repeat("*", len(val))
+		}
+		fmt.Fprintf(&s, "%s %s\n", theme.Label.Render(name+":"), val)
+	}
+	return s.String()
+}
+
+func read(rv reflect.Value, f registry.Field) string {
+	if !rv.IsValid() {
+		return ""
+	}
+	for _, k := range []string{f.Name, f.Flag} {
+		if k == "" {
+			continue
+		}
+		fv := rv.FieldByNameFunc(func(s string) bool { return strings.EqualFold(s, k) })
+		if fv.IsValid() {
+			return fmt.Sprintf("%v", fv.Interface())
+		}
+	}
+	return ""
+}

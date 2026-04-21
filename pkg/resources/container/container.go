@@ -1,0 +1,209 @@
+// Package container is an example resource demonstrating:
+//   - Fields with validation + dynamic suggestions
+//   - a Store for Get/List
+//   - Sagas for create + delete
+//   - a custom Action for `container logs`
+//
+// Replace this with your own resources when bootstrapping a new CLI.
+package container
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/bwagner5/go-cli-template/pkg/registry"
+)
+
+// Container is the resource type.
+type Container struct {
+	ID     string
+	Name   string
+	Image  string
+	Status string
+}
+
+// ---- In-memory store (swap this for a real backend) ----
+
+type store struct {
+	mu    sync.Mutex
+	items map[string]Container
+}
+
+func newStore() *store {
+	return &store{items: map[string]Container{
+		"c1": {ID: "c1", Name: "web", Image: "nginx:1.25", Status: "running"},
+		"c2": {ID: "c2", Name: "db", Image: "postgres:16", Status: "running"},
+	}}
+}
+
+var backend = newStore()
+
+func (s *store) Get(_ context.Context, id string) (any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.items {
+		if c.ID == id || c.Name == id {
+			return c, nil
+		}
+	}
+	return nil, fmt.Errorf("not found: %s", id)
+}
+
+func (s *store) List(_ context.Context, f registry.Filter) ([]any, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]any, 0, len(s.items))
+	for _, c := range s.items {
+		if f.NameLike != "" && !strings.Contains(c.Name, f.NameLike) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func (s *store) put(c Container) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items[c.ID] = c
+}
+
+func (s *store) delete(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.items, id)
+}
+
+// ---- Resource definition ----
+
+// Resource returns the registry.Resource for containers.
+func Resource() registry.Resource {
+	return registry.Resource{
+		Name:    "container",
+		Plural:  "containers",
+		Aliases: []string{"c", "ctr"},
+		Short:   "manage containers",
+		Fields: []registry.Field{
+			{Name: "ID", Flag: "id", Help: "container id", Table: registry.TableHint{Header: "ID"}},
+			{Name: "Name", Flag: "name", Short: "n", Help: "container name", Table: registry.TableHint{Header: "NAME"}},
+			{Name: "Image", Flag: "image", Help: "image", Table: registry.TableHint{Header: "IMAGE"}},
+			{Name: "Status", Flag: "status", Help: "status", Table: registry.TableHint{Header: "STATUS", Wide: true}},
+		},
+		Store: backend,
+		Sagas: map[string]registry.Saga{
+			"create": {
+				Name:  "create",
+				Short: "create a container",
+				Fields: []registry.Field{
+					{Flag: "name", Short: "n", Help: "container name", Required: true, Validate: nonEmpty},
+					{Flag: "image", Help: "image to run", Required: true, Suggest: suggestImages},
+				},
+				Steps: []registry.Step{
+					{Label: "Validate input", Do: func(_ context.Context, s *registry.State) error {
+						if s.Input.Get("name") == "" {
+							return fmt.Errorf("name required")
+						}
+						return nil
+					}},
+					{Label: "Pull image", Do: func(ctx context.Context, _ *registry.State) error {
+						select {
+						case <-time.After(600 * time.Millisecond):
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+						return nil
+					}},
+					{Label: "Start container", Do: func(_ context.Context, s *registry.State) error {
+						id := fmt.Sprintf("c%d", time.Now().UnixNano()%1000)
+						backend.put(Container{ID: id, Name: s.Input.Get("name"), Image: s.Input.Get("image"), Status: "running"})
+						s.Data["id"] = id
+						return nil
+					}},
+				},
+			},
+			"delete": {
+				Name:  "delete",
+				Short: "delete a container",
+				Fields: []registry.Field{
+					{Flag: "name", Short: "n", Help: "container name", Required: true, Suggest: suggestNames},
+				},
+				Steps: []registry.Step{
+					{Label: "Stop container", Do: func(_ context.Context, s *registry.State) error {
+						time.Sleep(200 * time.Millisecond)
+						return nil
+					}},
+					{Label: "Remove container", Do: func(_ context.Context, s *registry.State) error {
+						name := s.Input.Get("name")
+						for _, c := range mustList() {
+							if c.Name == name {
+								backend.delete(c.ID)
+								return nil
+							}
+						}
+						return fmt.Errorf("no container named %q", name)
+					}},
+				},
+			},
+		},
+		Actions: map[string]registry.Action{
+			"logs": {
+				Verb:  "logs",
+				Short: "stream logs",
+				Fields: []registry.Field{
+					{Flag: "name", Short: "n", Help: "container name", Required: true, Suggest: suggestNames},
+					{Flag: "follow", Short: "f", Help: "follow", Default: "false"},
+				},
+				Run: func(ctx context.Context, in registry.Input) error {
+					name := in.Get("name")
+					for i := 1; i <= 5; i++ {
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case <-time.After(150 * time.Millisecond):
+						}
+						fmt.Printf("[%s] line %d\n", name, i)
+					}
+					return nil
+				},
+			},
+		},
+	}
+}
+
+// ---- Helpers ----
+
+func nonEmpty(v string) error {
+	if strings.TrimSpace(v) == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	return nil
+}
+
+func mustList() []Container {
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	out := make([]Container, 0, len(backend.items))
+	for _, c := range backend.items {
+		out = append(out, c)
+	}
+	return out
+}
+
+func suggestImages(_ context.Context) ([]registry.Choice, error) {
+	// Simulated "remote" lookup
+	time.Sleep(200 * time.Millisecond)
+	return []registry.Choice{
+		{Value: "nginx:1.25"}, {Value: "postgres:16"}, {Value: "redis:7"}, {Value: "alpine:3.19"},
+	}, nil
+}
+
+func suggestNames(_ context.Context) ([]registry.Choice, error) {
+	var cs []registry.Choice
+	for _, c := range mustList() {
+		cs = append(cs, registry.Choice{Value: c.Name, Help: c.Image})
+	}
+	return cs, nil
+}
