@@ -86,6 +86,14 @@ type Step struct {
 type Saga struct {
 	Name  string
 	Short string
+	// Key is an optional TUI key binding (e.g. "c", "ctrl+d"). When set,
+	// the TUI dispatches this key to launch the saga. Empty means the saga
+	// is available only via the command palette.
+	Key string
+	// Confirm, when non-empty, asks the user for explicit confirmation before
+	// the saga runs. Use for destructive operations (delete, restart, etc.).
+	// The string is the prompt shown to the user.
+	Confirm string
 	// Fields are the inputs the saga needs. They map to CLI flags / wizard prompts.
 	Fields []Field
 	Steps  []Step
@@ -93,8 +101,11 @@ type Saga struct {
 
 // Action is a resource-specific verb (e.g. container logs).
 type Action struct {
-	Verb   string
-	Short  string
+	Verb  string
+	Short string
+	// Key is an optional TUI key binding (e.g. "l" for logs). Empty means
+	// the action is available only via the command palette.
+	Key    string
 	Fields []Field
 	// Run is invoked with the parsed input. For streaming output, write to ctx.Stdout.
 	Run func(ctx context.Context, in Input) error

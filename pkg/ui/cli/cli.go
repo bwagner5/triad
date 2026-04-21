@@ -55,18 +55,27 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 }
 
 func resourceCmd(res registry.Resource, g *Globals) *cobra.Command {
+	list := func(cmd *cobra.Command, args []string) error {
+		items, err := res.Store.List(cmd.Context(), registry.Filter{})
+		if err != nil {
+			return err
+		}
+		return Render(cmd.OutOrStdout(), g.Output, res, items)
+	}
 	c := &cobra.Command{
 		Use:     res.Name,
 		Aliases: append([]string{res.Plural}, res.Aliases...),
 		Short:   res.Short,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			items, err := res.Store.List(cmd.Context(), registry.Filter{})
-			if err != nil {
-				return err
-			}
-			return Render(cmd.OutOrStdout(), g.Output, res, items)
-		},
+		RunE:    list,
 	}
+
+	// Explicit `list` subcommand so it appears in help. The bare `<resource>`
+	// remains a shortcut.
+	c.AddCommand(&cobra.Command{
+		Use:   "list",
+		Short: "list " + res.Plural,
+		RunE:  list,
+	})
 
 	c.AddCommand(&cobra.Command{
 		Use:   "get <id>",

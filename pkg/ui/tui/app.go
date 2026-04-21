@@ -18,6 +18,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/spinner"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
 	"github.com/bwagner5/go-cli-template/pkg/duration"
@@ -71,6 +72,8 @@ type app struct {
 	// Refresh bookkeeping for the bottom-border counter.
 	lastRefresh time.Time
 	nextRefresh time.Time
+	refreshing  bool
+	spin        spinner.Model
 
 	// Toast flash messages (top of screen).
 	toast *toast
@@ -78,6 +81,8 @@ type app struct {
 	palette paletteModel
 	help    helpOverlay
 	saga    sagaOverlay
+	confirm confirmOverlay
+	wizard  wizardOverlay
 
 	showPalette bool
 	showHelp    bool
@@ -90,7 +95,7 @@ func newApp(ctx context.Context, reg *registry.Registry, opts Options) *app {
 	if opts.Logo == "" {
 		opts.Logo = lipgloss.NewStyle().Foreground(theme.Warning).Render(ascii.Render(opts.Name))
 	}
-	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), palette: newPalette(reg), help: newHelp(), saga: newSagaOverlay()}
+	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), palette: newPalette(reg), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New()}
 	if all := reg.All(); len(all) > 0 {
 		r := all[0]
 		a.resource = &r
@@ -109,7 +114,7 @@ type itemsMsg struct {
 type sagaEventMsg runtime.Event
 
 func (a *app) Init() tea.Cmd {
-	return tea.Batch(a.refresh(), a.subscribeBus(), a.repaintTick())
+	return tea.Batch(a.refresh(), a.subscribeBus(), a.repaintTick(), a.spin.Tick)
 }
 
 // repaintTick drives 1-second UI repaints so the refresh countdown updates.
@@ -123,6 +128,7 @@ func (a *app) refresh() tea.Cmd {
 	if a.resource == nil {
 		return nil
 	}
+	a.refreshing = true
 	res := a.resource
 	return func() tea.Msg {
 		items, err := res.Store.List(a.ctx, registry.Filter{})
@@ -146,11 +152,13 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width, a.height = msg.Width, msg.Height
 		a.palette.SetSize(msg.Width, msg.Height)
 		a.saga.SetSize(msg.Width, msg.Height)
+		a.wizard.SetSize(msg.Width, msg.Height)
 	case tea.KeyPressMsg:
 		return a.handleKey(msg)
 	case itemsMsg:
 		if a.resource != nil && msg.resource == a.resource.Name {
 			a.items, a.err = msg.items, msg.err
+			a.refreshing = false
 			if a.cursor >= len(a.items) {
 				a.cursor = 0
 			}
@@ -184,14 +192,81 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case paletteResultMsg:
 		a.showPalette = false
 		return a.handlePaletteChoice(msg)
+	case startSagaMsg:
+		return a, a.startSaga(msg)
+	case wizardDoneMsg:
+		// Wizard finished collecting fields. Check if saga needs confirmation.
+		if msg.saga != nil && msg.saga.Confirm != "" {
+			a.confirm.Show(msg.saga.Confirm, msg.resource, msg.saga, msg.input)
+			return a, nil
+		}
+		return a, func() tea.Msg {
+			return startSagaMsg{resource: msg.resource, saga: msg.saga, input: msg.input}
+		}
+	case wizardSuggestMsg:
+		if a.wizard.Active() {
+			a.wizard.Update(msg)
+		}
+		return a, nil
+	case actionDoneMsg:
+		if msg.err != nil {
+			return a, a.showToast(toastErr, msg.err.Error())
+		}
+		return a, a.refresh()
 	case dismissSagaMsg:
 		a.saga.Clear()
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		a.spin, cmd = a.spin.Update(msg)
+		return a, cmd
+	}
+	// Route unhandled messages to wizard overlay when active (e.g. spinner ticks).
+	if a.wizard.Active() {
+		if _, cmd := a.wizard.Update(msg); cmd != nil {
+			return a, cmd
+		}
 	}
 	return a, nil
 }
 
 func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+
+	// Confirm overlay takes priority over everything.
+	if a.confirm.Active() {
+		accepted, confirmed := a.confirm.HandleKey(key)
+		if accepted {
+			if confirmed {
+				return a, func() tea.Msg {
+					return startSagaMsg{
+						resource: a.confirm.resource,
+						saga:     a.confirm.saga,
+						input:    a.confirm.input,
+					}
+				}
+			}
+			return a, nil
+		}
+		return a, nil
+	}
+
+	// Wizard overlay.
+	if a.wizard.Active() {
+		consumed, cmd := a.wizard.Update(msg)
+		if consumed {
+			return a, cmd
+		}
+		return a, nil
+	}
+
+	// Saga overlay: esc always dismisses; enter dismisses when in terminal state.
+	if a.saga.Active() {
+		if key == "esc" || (a.saga.done && key == "enter") {
+			a.saga.Clear()
+			return a, nil
+		}
+		return a, nil // consume all keys while saga is active
+	}
 
 	if a.showPalette {
 		p, cmd := a.palette.Update(msg)
@@ -205,32 +280,33 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	switch key {
-	case "q", "ctrl+c":
+	// Always-on emergency exit.
+	if key == "ctrl+c" {
 		return a, tea.Quit
-	case ":":
-		a.showPalette = true
-		a.palette.Focus()
-		return a, nil
-	case "?":
-		a.showHelp = true
-		return a, nil
-	case "j", "down":
-		if a.cursor < len(a.items)-1 {
-			a.cursor++
+	}
+
+	// Arrow-key aliases for j/k navigation.
+	switch key {
+	case "up":
+		key = "k"
+	case "down":
+		key = "j"
+	}
+
+	// Numeric resource switching: 0..9 jumps to that registered resource.
+	if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
+		idx := int(key[0] - '0')
+		all := a.reg.All()
+		if idx < len(all) {
+			a.resource = &all[idx]
+			a.mode = modeList
+			a.cursor = 0
+			return a, a.refresh()
 		}
-	case "k", "up":
-		if a.cursor > 0 {
-			a.cursor--
-		}
-	case "enter":
-		if a.mode == modeList && len(a.items) > 0 {
-			a.mode = modeDetail
-		}
-	case "esc":
-		a.mode = modeList
-	case "r":
-		return a, a.refresh()
+	}
+
+	if m, cmd, ok := a.dispatch(key); ok {
+		return m, cmd
 	}
 	return a, nil
 }
@@ -247,13 +323,8 @@ func (a *app) handlePaletteChoice(msg paletteResultMsg) (tea.Model, tea.Cmd) {
 		a.cursor = 0
 		return a, a.refresh()
 	case paletteAction, paletteSaga:
-		// Fire-and-forget: run with whatever defaults exist. The TUI does
-		// not currently run an in-TUI wizard; users can use the CLI for
-		// that. Sagas still stream into the overlay.
 		if e.saga != nil && e.resource != nil {
-			ch := runtime.Run(a.ctx, *e.resource, *e.saga, registry.Input{})
-			a.saga.Start(e.saga.Name)
-			return a, readSagaCmd(ch)
+			return a, a.launchSaga(e.resource, e.saga, nil)
 		}
 	}
 	return a, nil
@@ -302,7 +373,7 @@ func (a *app) View() tea.View {
 
 	base := lipgloss.JoinVertical(lipgloss.Left, header, body, bottom)
 
-	overlayActive := a.showHelp || a.showPalette || a.saga.Active()
+	overlayActive := a.showHelp || a.showPalette || a.saga.Active() || a.confirm.Active() || a.wizard.Active()
 	rootContent := base
 	if overlayActive {
 		rootContent = dimBackground(base)
@@ -310,13 +381,20 @@ func (a *app) View() tea.View {
 
 	var overlays []*lipgloss.Layer
 	if a.showHelp {
-		overlays = append(overlays, centeredLayer(a.help.Box(w, h), w, h, 2))
+		overlays = append(overlays, centeredLayer(a.help.Box(w, h, a.keyMap()), w, h, 2))
 	}
 	if a.showPalette {
 		overlays = append(overlays, centeredLayer(a.palette.Box(w, h), w, h, 3))
 	}
 	if a.saga.Active() {
 		overlays = append(overlays, centeredLayer(a.saga.Box(w, h), w, h, 4))
+	}
+	if a.confirm.Active() {
+		overlays = append(overlays, centeredLayer(a.confirm.Box(w, h), w, h, 5))
+	}
+	if a.wizard.Active() {
+		// Wizard is full-screen-ish; render it centered and large.
+		overlays = append(overlays, centeredLayer(a.wizard.Box(w, h), w, h, 5))
 	}
 
 	root := lipgloss.NewLayer(rootContent)
@@ -427,7 +505,7 @@ func (a *app) renderBody(w, h int) string {
 		id := detailID(a.resource, a.items[a.cursor])
 		titleStr = theme.Heading.Render(a.resource.Name) + theme.MutedText.Render("/") + theme.Value.Render(id)
 	}
-	footerStr := theme.MutedText.Render(a.refreshFooter())
+	footerStr := a.refreshFooter()
 
 	innerW := w - 2 // minus left/right borders
 	innerH := h - 2 // minus top/bottom borders
@@ -481,13 +559,16 @@ func borderLine(width int, left, mid, right, label string, style lipgloss.Style)
 
 // refreshFooter is the "Refresh in 10s | Last Refresh: 30s ago" string.
 func (a *app) refreshFooter() string {
+	if a.refreshing {
+		return " Refreshing " + a.spin.View() + " "
+	}
 	if a.resource == nil || a.lastRefresh.IsZero() {
 		return ""
 	}
 	now := time.Now()
 	next := a.nextRefresh.Sub(now)
 	since := now.Sub(a.lastRefresh)
-	return fmt.Sprintf(" Refresh in %s │ Last Refresh: %s ago ", duration.Short(next), duration.Short(since))
+	return theme.MutedText.Render(fmt.Sprintf(" Refresh in %s │ Last Refresh: %s ago ", duration.Short(next), duration.Short(since)))
 }
 
 func (a *app) renderList(maxW, maxH int) string {
@@ -499,6 +580,9 @@ func (a *app) renderList(maxW, maxH int) string {
 	}
 	if a.mode == modeDetail && len(a.items) > 0 {
 		return detailFor(a.resource, a.items[a.cursor])
+	}
+	if len(a.items) == 0 {
+		return theme.MutedText.Render(fmt.Sprintf("No %s to display…", a.resource.Plural))
 	}
 	return a.renderTable(maxH, maxW)
 }
@@ -574,13 +658,14 @@ func (a *app) renderBottom(w int) string {
 	}
 	left := " " + strings.Join(pills, " ")
 
-	keys := []string{
-		theme.Key.Render("<:>") + " palette",
-		theme.Key.Render("<?>") + " help",
-		theme.Key.Render("<r>") + " refresh",
-		theme.Key.Render("<↵>") + " detail",
-		theme.Key.Render("<esc>") + " back",
-		theme.Key.Render("<q>") + " quit",
+	// Build key hints from the dynamic key map, keeping resource + global
+	// bindings on the status bar (Navigation is implicit / too numerous).
+	var keys []string
+	for _, b := range a.keyMap() {
+		if b.Cat == "Navigation" {
+			continue
+		}
+		keys = append(keys, theme.Key.Render("<"+b.Key+">")+" "+b.Label)
 	}
 	right := strings.Join(keys, "  ") + " "
 

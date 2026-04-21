@@ -87,6 +87,7 @@ func (s *sagaOverlay) Box(w, _ int) string {
 		} else {
 			lines += theme.OK.Render("✓ complete") + "\n"
 		}
+		lines += "\n" + theme.MutedText.Render("press esc or enter to close")
 	}
 	width := 60
 	if w < width+4 {

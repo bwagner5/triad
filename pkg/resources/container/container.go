@@ -10,8 +10,10 @@ package container
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bwagner5/go-cli-template/pkg/registry"
@@ -40,6 +42,9 @@ func newStore() *store {
 }
 
 var backend = newStore()
+var idSeq atomic.Int64
+
+func init() { idSeq.Store(2) } // c1, c2 are pre-seeded
 
 func (s *store) Get(_ context.Context, id string) (any, error) {
 	s.mu.Lock()
@@ -53,6 +58,7 @@ func (s *store) Get(_ context.Context, id string) (any, error) {
 }
 
 func (s *store) List(_ context.Context, f registry.Filter) ([]any, error) {
+	time.Sleep(2 * time.Second)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]any, 0, len(s.items))
@@ -62,6 +68,9 @@ func (s *store) List(_ context.Context, f registry.Filter) ([]any, error) {
 		}
 		out = append(out, c)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].(Container).ID < out[j].(Container).ID
+	})
 	return out, nil
 }
 
@@ -96,10 +105,11 @@ func Resource() registry.Resource {
 		Sagas: map[string]registry.Saga{
 			"create": {
 				Name:  "create",
+				Key:   "c",
 				Short: "create a container",
 				Fields: []registry.Field{
 					{Flag: "name", Short: "n", Help: "container name", Required: true, Validate: nonEmpty},
-					{Flag: "image", Help: "image to run", Required: true, Suggest: suggestImages},
+					{Flag: "image", Help: "image to run (e.g. nginx:1.25)", Required: true},
 				},
 				Steps: []registry.Step{
 					{Label: "Validate input", Do: func(_ context.Context, s *registry.State) error {
@@ -117,7 +127,7 @@ func Resource() registry.Resource {
 						return nil
 					}},
 					{Label: "Start container", Do: func(_ context.Context, s *registry.State) error {
-						id := fmt.Sprintf("c%d", time.Now().UnixNano()%1000)
+						id := fmt.Sprintf("c%d", idSeq.Add(1))
 						backend.put(Container{ID: id, Name: s.Input.Get("name"), Image: s.Input.Get("image"), Status: "running"})
 						s.Data["id"] = id
 						return nil
@@ -125,8 +135,10 @@ func Resource() registry.Resource {
 				},
 			},
 			"delete": {
-				Name:  "delete",
-				Short: "delete a container",
+				Name:    "delete",
+				Key:     "ctrl+d",
+				Short:   "delete a container",
+				Confirm: "Delete this container? This cannot be undone.",
 				Fields: []registry.Field{
 					{Flag: "name", Short: "n", Help: "container name", Required: true, Suggest: suggestNames},
 				},
@@ -151,6 +163,7 @@ func Resource() registry.Resource {
 		Actions: map[string]registry.Action{
 			"logs": {
 				Verb:  "logs",
+				Key:   "l",
 				Short: "stream logs",
 				Fields: []registry.Field{
 					{Flag: "name", Short: "n", Help: "container name", Required: true, Suggest: suggestNames},
@@ -190,14 +203,6 @@ func mustList() []Container {
 		out = append(out, c)
 	}
 	return out
-}
-
-func suggestImages(_ context.Context) ([]registry.Choice, error) {
-	// Simulated "remote" lookup
-	time.Sleep(200 * time.Millisecond)
-	return []registry.Choice{
-		{Value: "nginx:1.25"}, {Value: "postgres:16"}, {Value: "redis:7"}, {Value: "alpine:3.19"},
-	}, nil
 }
 
 func suggestNames(_ context.Context) ([]registry.Choice, error) {
