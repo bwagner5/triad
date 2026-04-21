@@ -20,6 +20,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
+	"github.com/bwagner5/go-cli-template/pkg/duration"
 	"github.com/bwagner5/go-cli-template/pkg/registry"
 	"github.com/bwagner5/go-cli-template/pkg/runtime"
 	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
@@ -56,6 +57,13 @@ type app struct {
 	cursor        int
 	err           error
 
+	// Refresh bookkeeping for the bottom-border counter.
+	lastRefresh time.Time
+	nextRefresh time.Time
+
+	// Toast flash messages (top of screen).
+	toast *toast
+
 	palette paletteModel
 	help    helpOverlay
 	saga    sagaOverlay
@@ -84,8 +92,15 @@ type itemsMsg struct {
 type sagaEventMsg runtime.Event
 
 func (a *app) Init() tea.Cmd {
-	return tea.Batch(a.refresh(), a.subscribeBus())
+	return tea.Batch(a.refresh(), a.subscribeBus(), a.repaintTick())
 }
+
+// repaintTick drives 1-second UI repaints so the refresh countdown updates.
+func (a *app) repaintTick() tea.Cmd {
+	return tea.Tick(time.Second, func(_ time.Time) tea.Msg { return repaintMsg{} })
+}
+
+type repaintMsg struct{}
 
 func (a *app) refresh() tea.Cmd {
 	if a.resource == nil {
@@ -122,16 +137,31 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.cursor >= len(a.items) {
 				a.cursor = 0
 			}
+			a.lastRefresh = time.Now()
+			a.nextRefresh = a.lastRefresh.Add(a.sched.Interval(a.resource.Name))
 		}
 		return a, a.scheduleRefresh()
 	case tickMsg:
 		return a, tea.Batch(a.refresh())
+	case repaintMsg:
+		return a, a.repaintTick()
+	case toastExpireMsg:
+		if a.toast != nil && time.Now().After(a.toast.until) {
+			a.toast = nil
+		}
+		return a, nil
 	case sagaEventMsg:
 		ev := runtime.Event(msg)
 		a.saga.Push(ev)
 		if ev.Done {
 			a.sched.Bump(ev.Resource)
-			return a, tea.Batch(a.saga.DismissAfter(), a.refresh(), a.subscribeBus())
+			var toastCmd tea.Cmd
+			if ev.Err != nil {
+				toastCmd = a.showToast(toastErr, fmt.Sprintf("%s failed: %s", ev.Saga, ev.Err.Error()))
+			} else {
+				toastCmd = a.showToast(toastOK, fmt.Sprintf("%s succeeded", ev.Saga))
+			}
+			return a, tea.Batch(a.saga.DismissAfter(), a.refresh(), a.subscribeBus(), toastCmd)
 		}
 		return a, a.subscribeBus()
 	case paletteResultMsg:
@@ -236,36 +266,28 @@ func readSagaCmd(ch <-chan runtime.Event) tea.Cmd {
 
 // ---- View ----
 
+// headerH is the height of the top block: banner(1) + toast row(1) + resource hints.
+const headerH = 6
+
 func (a *app) View() tea.View {
 	w, h := a.width, a.height
-	if w < 20 || h < 6 {
+	if w < 40 || h < 12 {
 		return tea.NewView("")
 	}
 
-	topBar := a.renderTopBar()       // 1 row, full width
-	statusBar := a.renderStatusBar() // 1 row, full width
-	bodyH := h - 2                   // top + bottom bars
-	if bodyH < 1 {
-		bodyH = 1
+	header := a.renderHeader(w)  // headerH rows
+	bottom := a.renderBottom(w)  // 1 row: pills + key hints
+	bodyH := h - headerH - 1
+	if bodyH < 3 {
+		bodyH = 3
 	}
-	body := lipgloss.NewStyle().
-		Width(w).
-		Height(bodyH).
-		MaxHeight(bodyH).
-		Padding(1, 2).
-		Render(a.renderBody(bodyH - 2)) // -2 for padding rows
+	body := a.renderBody(w, bodyH)
 
-	base := lipgloss.JoinVertical(lipgloss.Left, topBar, body, statusBar)
+	base := lipgloss.JoinVertical(lipgloss.Left, header, body, bottom)
 
-	// Collect overlays (if any) and nest them inside the base layer so
-	// absolute X/Y positioning works.
 	var overlays []*lipgloss.Layer
 	if a.showHelp {
-		// Dim layer covers the whole background.
-		dim := lipgloss.NewStyle().
-			Width(w).Height(h).
-			Foreground(theme.Muted).
-			Render("")
+		dim := lipgloss.NewStyle().Width(w).Height(h).Foreground(theme.Muted).Render("")
 		overlays = append(overlays, lipgloss.NewLayer(dim).X(0).Y(0).Z(1))
 		overlays = append(overlays, centeredLayer(a.help.Box(w, h), w, h, 2))
 	}
@@ -285,8 +307,6 @@ func (a *app) View() tea.View {
 	return v
 }
 
-// centeredLayer builds a layer whose top-left is placed so the content is
-// centered within a w×h area.
 func centeredLayer(content string, w, h, z int) *lipgloss.Layer {
 	cw := lipgloss.Width(content)
 	ch := lipgloss.Height(content)
@@ -301,54 +321,147 @@ func centeredLayer(content string, w, h, z int) *lipgloss.Layer {
 	return lipgloss.NewLayer(content).X(x).Y(y).Z(z)
 }
 
-func (a *app) renderTopBar() string {
-	brand := theme.Heading.Render(" go-cli-template ")
-	resName := ""
-	if a.resource != nil {
-		resName = strings.ToUpper(a.resource.Plural)
+// renderHeader builds the top block:
+//   row 0: "go-cli-template" banner (no label) left, logo right.
+//   row 1: toast (or blank).
+//   rows 2-headerH: resource hotkeys as a horizontal list.
+func (a *app) renderHeader(w int) string {
+	logo := theme.Logo
+	logoW := lipgloss.Width(logo)
+
+	bannerRow := lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(w-logoW-2).Padding(0, 1).Render(theme.Heading.Render("go-cli-template")),
+		logo,
+	)
+
+	toastLine := ""
+	if a.toast != nil {
+		toastLine = lipgloss.PlaceHorizontal(w, lipgloss.Center, a.toast.view())
 	}
-	crumb := theme.Label.Render(resName)
-	right := theme.MutedText.Render(fmt.Sprintf("%d items ", len(a.items)))
-	// Left block and right block; middle filler.
-	left := brand + "  " + crumb
-	filler := a.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if filler < 1 {
-		filler = 1
-	}
-	line := left + strings.Repeat(" ", filler) + right
-	return lipgloss.NewStyle().
-		Width(a.width).
-		Background(theme.Subtle).
-		Foreground(theme.Text).
-		Render(line)
+
+	resHints := a.renderResourceHints(w)
+
+	block := lipgloss.JoinVertical(lipgloss.Left, bannerRow, toastLine, resHints)
+	return lipgloss.NewStyle().Width(w).Height(headerH).MaxHeight(headerH).Render(block)
 }
 
-func (a *app) renderBody(maxH int) string {
+// renderResourceHints lays out resource hotkeys horizontally across one row.
+func (a *app) renderResourceHints(w int) string {
+	all := a.reg.All()
+	if len(all) == 0 {
+		return ""
+	}
+	var parts []string
+	for i, r := range all {
+		if i >= 10 {
+			break
+		}
+		key := theme.Key.Render(fmt.Sprintf("<%d>", i))
+		name := r.Plural
+		style := theme.MutedText
+		if a.resource != nil && r.Name == a.resource.Name {
+			style = theme.Value
+		}
+		parts = append(parts, key+" "+style.Render(name))
+	}
+	row := " " + strings.Join(parts, "   ")
+	return lipgloss.NewStyle().Width(w).Render(row)
+}
+
+// renderBody draws a bordered box with a title embedded on the top border
+// (like k9s's "Pods(all)[23]") and a refresh counter embedded on the bottom
+// border. The border is hand-constructed so all four sides share exactly one
+// BorderForeground color — no ANSI splicing.
+func (a *app) renderBody(w, h int) string {
+	title := "—"
+	count := 0
+	if a.resource != nil {
+		title = a.resource.Plural
+		count = len(a.items)
+	}
+	titleStr := theme.Heading.Render(title) + theme.MutedText.Render(fmt.Sprintf("[%d]", count))
+	if a.mode == modeDetail && a.resource != nil && len(a.items) > 0 {
+		id := detailID(a.resource, a.items[a.cursor])
+		titleStr = theme.Heading.Render(a.resource.Name) + theme.MutedText.Render("/") + theme.Value.Render(id)
+	}
+	footerStr := theme.MutedText.Render(a.refreshFooter())
+
+	innerW := w - 2 // minus left/right borders
+	innerH := h - 2 // minus top/bottom borders
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	inner := a.renderList(innerW, innerH)
+	// Force inner to exactly innerW × innerH so the side borders line up.
+	inner = lipgloss.NewStyle().Width(innerW).Height(innerH).MaxHeight(innerH).Render(inner)
+
+	borderStyle := lipgloss.NewStyle().Foreground(theme.Subtle)
+	top := borderLine(w, "╭", "─", "╮", titleStr, borderStyle)
+	bottom := borderLine(w, "╰", "─", "╯", footerStr, borderStyle)
+
+	// Prefix each inner line with a styled vertical bar.
+	vert := borderStyle.Render("│")
+	var lines []string
+	lines = append(lines, top)
+	for _, ln := range strings.Split(inner, "\n") {
+		lines = append(lines, vert+ln+vert)
+	}
+	lines = append(lines, bottom)
+	return strings.Join(lines, "\n")
+}
+
+// borderLine builds a horizontal border line of the given total width, with
+// `label` centered in it. `left`, `mid`, and `right` are the corner/fill runes.
+// All border runes (corners + fill) use the same style so the border appears as
+// a single color.
+func borderLine(width int, left, mid, right, label string, style lipgloss.Style) string {
+	if width < 2 {
+		return ""
+	}
+	midW := width - 2
+	labelW := lipgloss.Width(label)
+	if labelW > midW-2 {
+		// Label too wide: clip to fit (best-effort).
+		label = ""
+		labelW = 0
+	}
+	leftPad := (midW - labelW) / 2
+	rightPad := midW - labelW - leftPad
+	line := style.Render(left) +
+		style.Render(strings.Repeat(mid, leftPad)) +
+		label +
+		style.Render(strings.Repeat(mid, rightPad)) +
+		style.Render(right)
+	return line
+}
+
+// refreshFooter is the "Refresh in 10s | Last Refresh: 30s ago" string.
+func (a *app) refreshFooter() string {
+	if a.resource == nil || a.lastRefresh.IsZero() {
+		return ""
+	}
+	now := time.Now()
+	next := a.nextRefresh.Sub(now)
+	since := now.Sub(a.lastRefresh)
+	return fmt.Sprintf(" Refresh in %s │ Last Refresh: %s ago ", duration.Short(next), duration.Short(since))
+}
+
+func (a *app) renderList(maxW, maxH int) string {
 	if a.resource == nil {
 		return theme.MutedText.Render("no resources registered")
 	}
 	if a.err != nil {
 		return theme.Err.Render(a.err.Error())
 	}
-	detail := ""
-	detailH := 0
 	if a.mode == modeDetail && len(a.items) > 0 {
-		detail = theme.Label.Render("DETAIL") + "\n" + detailFor(a.resource, a.items[a.cursor])
-		detailH = lipgloss.Height(detail) + 1
+		return detailFor(a.resource, a.items[a.cursor])
 	}
-	rowBudget := maxH - detailH
-	if rowBudget < 1 {
-		rowBudget = 1
-	}
-	t := a.renderTable(rowBudget)
-	if detail == "" {
-		return t
-	}
-	return t + "\n" + detail
+	return a.renderTable(maxH, maxW)
 }
 
 // renderTable builds a lipgloss table with headers and a highlighted cursor row.
-func (a *app) renderTable(maxRows int) string {
+func (a *app) renderTable(maxRows, maxW int) string {
 	var headers []string
 	var fields []registry.Field
 	for _, f := range a.resource.Fields {
@@ -358,7 +471,6 @@ func (a *app) renderTable(maxRows int) string {
 		headers = append(headers, f.Table.Header)
 		fields = append(fields, f)
 	}
-	// Leave one header row in the budget.
 	visible := maxRows - 1
 	if visible < 1 {
 		visible = 1
@@ -385,6 +497,7 @@ func (a *app) renderTable(maxRows int) string {
 		rows = append(rows, row)
 	}
 	t := table.New().
+		Width(maxW).
 		Headers(headers...).
 		Rows(rows...).
 		Border(lipgloss.HiddenBorder()).
@@ -405,26 +518,36 @@ func (a *app) renderTable(maxRows int) string {
 	return t.Render()
 }
 
-func (a *app) renderStatusBar() string {
-	keys := []string{
-		theme.Key.Render(":") + " palette",
-		theme.Key.Render("?") + " help",
-		theme.Key.Render("r") + " refresh",
-		theme.Key.Render("enter") + " detail",
-		theme.Key.Render("q") + " quit",
-	}
-	bar := " "
-	for i, k := range keys {
-		if i > 0 {
-			bar += theme.MutedText.Render("  ·  ")
+// renderBottom renders the last row: breadcrumb pills on the left,
+// contextual key bindings on the right.
+func (a *app) renderBottom(w int) string {
+	var pills []string
+	for _, r := range a.reg.All() {
+		if a.resource != nil && r.Name == a.resource.Name {
+			pills = append(pills, theme.PillActive.Render("<"+r.Name+">"))
+		} else {
+			pills = append(pills, theme.PillIdle.Render("<"+r.Name+">"))
 		}
-		bar += k
 	}
-	// Pad to full width so the background fills the row.
-	return lipgloss.NewStyle().
-		Width(a.width).
-		Background(theme.Subtle).
-		Render(bar)
+	left := " " + strings.Join(pills, " ")
+
+	keys := []string{
+		theme.Key.Render("<:>") + " palette",
+		theme.Key.Render("<?>") + " help",
+		theme.Key.Render("<r>") + " refresh",
+		theme.Key.Render("<↵>") + " detail",
+		theme.Key.Render("<esc>") + " back",
+		theme.Key.Render("<q>") + " quit",
+	}
+	right := strings.Join(keys, "  ") + " "
+
+	lw := lipgloss.Width(left)
+	rw := lipgloss.Width(right)
+	fill := w - lw - rw
+	if fill < 1 {
+		fill = 1
+	}
+	return lipgloss.NewStyle().Width(w).Render(left + strings.Repeat(" ", fill) + right)
 }
 
 // dismissSagaMsg clears the saga overlay after the auto-dismiss timer fires.

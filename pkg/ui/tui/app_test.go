@@ -9,38 +9,36 @@ import (
 	"github.com/bwagner5/go-cli-template/pkg/registry"
 )
 
-// viewSnapshot drives a minimal WindowSizeMsg and renders the view to a string.
-func viewSnapshot(t *testing.T, w, h int) string {
-	t.Helper()
+// TestTabsOnLastRow asserts the k9s-style breadcrumb pills live on the bottom row.
+func TestTabsOnLastRow(t *testing.T) {
 	reg := registry.New()
 	a := newApp(context.Background(), reg)
+	// Register a fake resource so there's at least one pill.
+	reg.Register(registry.Resource{Name: "thing", Plural: "things", Store: fakeStore{}})
+	a.resource = ptr(reg.All()[0])
 	var m tea.Model = a
-	m, _ = m.Update(tea.WindowSizeMsg{Width: w, Height: h})
-	v := m.(*app).View()
-	return v.Content
-}
-
-// TestStatusBarOnLastRow asserts the rendered view has the status-bar keys
-// (":", "?", "q") on the last line.
-func TestStatusBarOnLastRow(t *testing.T) {
-	out := viewSnapshot(t, 80, 24)
-	// Strip ANSI for inspection.
-	plain := stripANSI(out)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	plain := stripANSI(m.(*app).View().Content)
 	lines := strings.Split(plain, "\n")
-	// Drop the trailing empty element from the final newline if present.
 	if len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	if len(lines) < 24 {
-		t.Fatalf("expected 24 lines, got %d\nfull:\n%q", len(lines), plain)
+	if len(lines) < 30 {
+		t.Fatalf("expected >= 30 lines, got %d", len(lines))
 	}
 	last := lines[len(lines)-1]
-	for _, want := range []string{":", "?", "q", "palette", "help", "quit"} {
-		if !strings.Contains(last, want) {
-			t.Errorf("last line missing %q\nlast=%q\nfull:\n%s", want, last, plain)
-		}
+	if !strings.Contains(last, "<thing>") {
+		t.Errorf("last line missing pill: %q", last)
 	}
 }
+
+type fakeStore struct{}
+
+func (fakeStore) Get(_ context.Context, _ string) (any, error) { return nil, nil }
+func (fakeStore) List(_ context.Context, _ registry.Filter) ([]any, error) {
+	return nil, nil
+}
+func ptr[T any](v T) *T { return &v }
 
 // TestHelpOverlayCentered asserts the help modal is roughly centered in both
 // axes when toggled.

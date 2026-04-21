@@ -9,6 +9,19 @@ import (
 	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
 )
 
+// detailID returns a short identifier for an item — the first table-visible
+// field. Falls back to empty string if none is available.
+func detailID(res *registry.Resource, item any) string {
+	rv := reflect.Indirect(reflect.ValueOf(item))
+	for _, f := range res.Fields {
+		if f.Table.Header == "" {
+			continue
+		}
+		return read(rv, f)
+	}
+	return ""
+}
+
 // detailFor renders a full field-by-field view of an item.
 func detailFor(res *registry.Resource, item any) string {
 	rv := reflect.Indirect(reflect.ValueOf(item))
