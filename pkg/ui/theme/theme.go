@@ -25,17 +25,10 @@ var (
 	// Toast styles for top-of-screen flash messages.
 	ToastOK  = lipgloss.NewStyle().Background(Success).Foreground(lipgloss.Color("#0b0f14")).Bold(true).Padding(0, 2)
 	ToastErr = lipgloss.NewStyle().Background(Danger).Foreground(lipgloss.Color("#0b0f14")).Bold(true).Padding(0, 2)
-	Border   = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(Subtle).
-			Padding(0, 1)
-
-	// Logo is the CLI's ASCII-art badge, rendered in the top-right of the header.
-	// Override at startup to match your CLI name.
-	Logo = lipgloss.NewStyle().Foreground(Warning).Render(`  ___   ___ _____
- / __| / __|_   _|
-| (__  \__ \ | |
- \___| |___/ |_|  `)
+	Border = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(Subtle).
+		Padding(0, 1)
 
 	// PillActive / PillIdle are k9s-style breadcrumb tabs rendered at the bottom.
 	PillActive = lipgloss.NewStyle().

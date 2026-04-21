@@ -14,19 +14,22 @@ import (
 
 var version = "dev"
 
+const cliName = "go-cli-template"
+
 func main() {
 	// 1) Declare resources. This is the main extension point.
 	registry.Register(container.Resource())
 
 	// 2) Build the CLI.
 	g := &cli.Globals{}
-	root := cli.Build("go-cli-template", "CLI scaffold with CLI + wizard + TUI", registry.Default(), g)
+	root := cli.Build(cliName, "CLI scaffold with CLI + wizard + TUI", registry.Default(), g)
 	root.Version = version
 
 	// 3) Add the `tui` sub-command, and make it the default when no
 	//    sub-command is given.
+	tuiOpts := tui.Options{Name: cliName}
 	runTUI := func(cmd *cobra.Command, _ []string) error {
-		return tui.Run(cmd.Context(), registry.Default())
+		return tui.Run(cmd.Context(), registry.Default(), tuiOpts)
 	}
 	root.RunE = runTUI
 	root.AddCommand(&cobra.Command{

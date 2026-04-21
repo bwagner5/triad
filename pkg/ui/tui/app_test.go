@@ -12,7 +12,7 @@ import (
 // TestTabsOnLastRow asserts the k9s-style breadcrumb pills live on the bottom row.
 func TestTabsOnLastRow(t *testing.T) {
 	reg := registry.New()
-	a := newApp(context.Background(), reg)
+	a := newApp(context.Background(), reg, Options{Name: "test"})
 	// Register a fake resource so there's at least one pill.
 	reg.Register(registry.Resource{Name: "thing", Plural: "things", Store: fakeStore{}})
 	a.resource = ptr(reg.All()[0])
@@ -44,7 +44,7 @@ func ptr[T any](v T) *T { return &v }
 // axes when toggled.
 func TestHelpOverlayCentered(t *testing.T) {
 	reg := registry.New()
-	a := newApp(context.Background(), reg)
+	a := newApp(context.Background(), reg, Options{Name: "test"})
 	var m tea.Model = a
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	// Simulate "?" press.

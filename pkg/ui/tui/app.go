@@ -23,15 +23,25 @@ import (
 	"github.com/bwagner5/go-cli-template/pkg/duration"
 	"github.com/bwagner5/go-cli-template/pkg/registry"
 	"github.com/bwagner5/go-cli-template/pkg/runtime"
+	"github.com/bwagner5/go-cli-template/pkg/ui/ascii"
 	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
 )
 
 func reflectIndirect(v any) reflect.Value { return reflect.Indirect(reflect.ValueOf(v)) }
 func readField(rv reflect.Value, f registry.Field) string { return read(rv, f) }
 
+// Options configures the TUI.
+type Options struct {
+	// Name is the CLI name shown as the banner at the top of the screen.
+	Name string
+	// Logo, if non-empty, overrides the auto-generated ASCII banner derived
+	// from Name. Supply a pre-styled, multi-line string.
+	Logo string
+}
+
 // Run starts the full-screen TUI against the given registry.
-func Run(ctx context.Context, reg *registry.Registry) error {
-	m := newApp(ctx, reg)
+func Run(ctx context.Context, reg *registry.Registry, opts Options) error {
+	m := newApp(ctx, reg, opts)
 	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
 	return err
 }
@@ -49,6 +59,7 @@ type app struct {
 	ctx   context.Context
 	reg   *registry.Registry
 	sched *runtime.Scheduler
+	opts  Options
 
 	width, height int
 	mode          mode
@@ -72,8 +83,14 @@ type app struct {
 	showHelp    bool
 }
 
-func newApp(ctx context.Context, reg *registry.Registry) *app {
-	a := &app{ctx: ctx, reg: reg, sched: runtime.NewScheduler(), palette: newPalette(reg), help: newHelp(), saga: newSagaOverlay()}
+func newApp(ctx context.Context, reg *registry.Registry, opts Options) *app {
+	if opts.Name == "" {
+		opts.Name = "cli"
+	}
+	if opts.Logo == "" {
+		opts.Logo = lipgloss.NewStyle().Foreground(theme.Warning).Render(ascii.Render(opts.Name))
+	}
+	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), palette: newPalette(reg), help: newHelp(), saga: newSagaOverlay()}
 	if all := reg.All(); len(all) > 0 {
 		r := all[0]
 		a.resource = &r
@@ -266,8 +283,8 @@ func readSagaCmd(ch <-chan runtime.Event) tea.Cmd {
 
 // ---- View ----
 
-// headerH is the height of the top block: banner(1) + toast row(1) + resource hints.
-const headerH = 6
+// headerH is the height of the top block: banner(ascii.Height) + toast(1) + resource hints(1).
+var headerH = ascii.Height + 2
 
 func (a *app) View() tea.View {
 	w, h := a.width, a.height
@@ -322,17 +339,11 @@ func centeredLayer(content string, w, h, z int) *lipgloss.Layer {
 }
 
 // renderHeader builds the top block:
-//   row 0: "go-cli-template" banner (no label) left, logo right.
-//   row 1: toast (or blank).
-//   rows 2-headerH: resource hotkeys as a horizontal list.
+//   rows 0-4: auto-generated ASCII banner for the CLI name (or user override).
+//   row 5:    toast (or blank).
 func (a *app) renderHeader(w int) string {
-	logo := theme.Logo
-	logoW := lipgloss.Width(logo)
-
-	bannerRow := lipgloss.JoinHorizontal(lipgloss.Top,
-		lipgloss.NewStyle().Width(w-logoW-2).Padding(0, 1).Render(theme.Heading.Render("go-cli-template")),
-		logo,
-	)
+	banner := a.opts.Logo
+	bannerLine := lipgloss.NewStyle().Width(w).Padding(0, 1).Render(banner)
 
 	toastLine := ""
 	if a.toast != nil {
@@ -341,7 +352,7 @@ func (a *app) renderHeader(w int) string {
 
 	resHints := a.renderResourceHints(w)
 
-	block := lipgloss.JoinVertical(lipgloss.Left, bannerRow, toastLine, resHints)
+	block := lipgloss.JoinVertical(lipgloss.Left, bannerLine, toastLine, resHints)
 	return lipgloss.NewStyle().Width(w).Height(headerH).MaxHeight(headerH).Render(block)
 }
 
