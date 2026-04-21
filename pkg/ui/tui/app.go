@@ -302,10 +302,14 @@ func (a *app) View() tea.View {
 
 	base := lipgloss.JoinVertical(lipgloss.Left, header, body, bottom)
 
+	overlayActive := a.showHelp || a.showPalette || a.saga.Active()
+	rootContent := base
+	if overlayActive {
+		rootContent = dimBackground(base)
+	}
+
 	var overlays []*lipgloss.Layer
 	if a.showHelp {
-		dim := lipgloss.NewStyle().Width(w).Height(h).Foreground(theme.Muted).Render("")
-		overlays = append(overlays, lipgloss.NewLayer(dim).X(0).Y(0).Z(1))
 		overlays = append(overlays, centeredLayer(a.help.Box(w, h), w, h, 2))
 	}
 	if a.showPalette {
@@ -315,13 +319,41 @@ func (a *app) View() tea.View {
 		overlays = append(overlays, centeredLayer(a.saga.Box(w, h), w, h, 4))
 	}
 
-	root := lipgloss.NewLayer(base)
+	root := lipgloss.NewLayer(rootContent)
 	if len(overlays) > 0 {
 		root = root.AddLayers(overlays...)
 	}
 	v := tea.NewView(lipgloss.NewCompositor(root).Render())
 	v.AltScreen = true
 	return v
+}
+
+// dimBackground strips ANSI styling from s and re-renders every non-space
+// cell in a muted color, producing a clearly darker-than-foreground backdrop
+// behind modal overlays.
+func dimBackground(s string) string {
+	plain := stripANSI(s)
+	return lipgloss.NewStyle().Foreground(theme.Muted).Render(plain)
+}
+
+// stripANSI removes CSI-SGR escape sequences from s.
+func stripANSI(s string) string {
+	var b strings.Builder
+	in := false
+	for _, r := range s {
+		if r == 0x1b {
+			in = true
+			continue
+		}
+		if in {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				in = false
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func centeredLayer(content string, w, h, z int) *lipgloss.Layer {

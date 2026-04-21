@@ -76,21 +76,3 @@ func TestHelpOverlayCentered(t *testing.T) {
 		t.Errorf("Help modal not horizontally centered: col=%d, line=%q", col, lines[row])
 	}
 }
-func stripANSI(s string) string {
-	var b strings.Builder
-	in := false
-	for _, r := range s {
-		if r == 0x1b {
-			in = true
-			continue
-		}
-		if in {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
-				in = false
-			}
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
