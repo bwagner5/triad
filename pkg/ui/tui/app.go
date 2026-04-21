@@ -13,14 +13,20 @@ package tui
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"charm.land/lipgloss/v2/table"
 	"github.com/bwagner5/go-cli-template/pkg/registry"
 	"github.com/bwagner5/go-cli-template/pkg/runtime"
 	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
 )
+
+func reflectIndirect(v any) reflect.Value { return reflect.Indirect(reflect.ValueOf(v)) }
+func readField(rv reflect.Value, f registry.Field) string { return read(rv, f) }
 
 // Run starts the full-screen TUI against the given registry.
 func Run(ctx context.Context, reg *registry.Registry) error {
@@ -231,61 +237,172 @@ func readSagaCmd(ch <-chan runtime.Event) tea.Cmd {
 // ---- View ----
 
 func (a *app) View() tea.View {
-	body := a.renderBody()
-	status := a.renderStatusBar()
-	content := lipgloss.JoinVertical(lipgloss.Left, body, status)
+	w, h := a.width, a.height
+	if w < 20 || h < 6 {
+		return tea.NewView("")
+	}
 
-	// Compose overlays via lipgloss Canvas + Layers.
-	canvas := lipgloss.NewCanvas(a.width, a.height)
-	canvas.Compose(lipgloss.NewLayer(content))
+	topBar := a.renderTopBar()       // 1 row, full width
+	statusBar := a.renderStatusBar() // 1 row, full width
+	bodyH := h - 2                   // top + bottom bars
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	body := lipgloss.NewStyle().
+		Width(w).
+		Height(bodyH).
+		MaxHeight(bodyH).
+		Padding(1, 2).
+		Render(a.renderBody(bodyH - 2)) // -2 for padding rows
+
+	base := lipgloss.JoinVertical(lipgloss.Left, topBar, body, statusBar)
+
+	// Collect overlays (if any) and nest them inside the base layer so
+	// absolute X/Y positioning works.
+	var overlays []*lipgloss.Layer
 	if a.showHelp {
-		dim := lipgloss.NewStyle().Foreground(theme.Muted).Render(content)
-		canvas = lipgloss.NewCanvas(a.width, a.height)
-		canvas.Compose(lipgloss.NewLayer(dim))
-		canvas.Compose(a.help.Layer(a.width, a.height))
+		// Dim layer covers the whole background.
+		dim := lipgloss.NewStyle().
+			Width(w).Height(h).
+			Foreground(theme.Muted).
+			Render("")
+		overlays = append(overlays, lipgloss.NewLayer(dim).X(0).Y(0).Z(1))
+		overlays = append(overlays, centeredLayer(a.help.Box(w, h), w, h, 2))
 	}
 	if a.showPalette {
-		canvas.Compose(a.palette.Layer(a.width, a.height))
+		overlays = append(overlays, centeredLayer(a.palette.Box(w, h), w, h, 3))
 	}
 	if a.saga.Active() {
-		canvas.Compose(a.saga.Layer(a.width, a.height))
+		overlays = append(overlays, centeredLayer(a.saga.Box(w, h), w, h, 4))
 	}
-	v := tea.NewView(canvas.Render())
+
+	root := lipgloss.NewLayer(base)
+	if len(overlays) > 0 {
+		root = root.AddLayers(overlays...)
+	}
+	v := tea.NewView(lipgloss.NewCompositor(root).Render())
 	v.AltScreen = true
 	return v
 }
 
-func (a *app) renderBody() string {
+// centeredLayer builds a layer whose top-left is placed so the content is
+// centered within a w×h area.
+func centeredLayer(content string, w, h, z int) *lipgloss.Layer {
+	cw := lipgloss.Width(content)
+	ch := lipgloss.Height(content)
+	x := (w - cw) / 2
+	y := (h - ch) / 2
+	if x < 0 {
+		x = 0
+	}
+	if y < 0 {
+		y = 0
+	}
+	return lipgloss.NewLayer(content).X(x).Y(y).Z(z)
+}
+
+func (a *app) renderTopBar() string {
+	brand := theme.Heading.Render(" go-cli-template ")
+	resName := ""
+	if a.resource != nil {
+		resName = strings.ToUpper(a.resource.Plural)
+	}
+	crumb := theme.Label.Render(resName)
+	right := theme.MutedText.Render(fmt.Sprintf("%d items ", len(a.items)))
+	// Left block and right block; middle filler.
+	left := brand + "  " + crumb
+	filler := a.width - lipgloss.Width(left) - lipgloss.Width(right)
+	if filler < 1 {
+		filler = 1
+	}
+	line := left + strings.Repeat(" ", filler) + right
+	return lipgloss.NewStyle().
+		Width(a.width).
+		Background(theme.Subtle).
+		Foreground(theme.Text).
+		Render(line)
+}
+
+func (a *app) renderBody(maxH int) string {
 	if a.resource == nil {
 		return theme.MutedText.Render("no resources registered")
 	}
-	header := theme.Heading.Render(a.resource.Plural)
 	if a.err != nil {
-		return header + "\n" + theme.Err.Render(a.err.Error())
+		return theme.Err.Render(a.err.Error())
 	}
-	rowHeight := a.height - 4
-	if rowHeight < 1 {
-		rowHeight = 1
-	}
-	var rows []string
-	for i, it := range a.items {
-		marker := "  "
-		if i == a.cursor {
-			marker = theme.Key.Render("▸ ")
-		}
-		rows = append(rows, marker+summarize(a.resource, it))
-		if len(rows) >= rowHeight {
-			break
-		}
-	}
-	body := header + "\n" + theme.MutedText.Render(fmt.Sprintf("%d items", len(a.items))) + "\n"
-	for _, r := range rows {
-		body += r + "\n"
-	}
+	detail := ""
+	detailH := 0
 	if a.mode == modeDetail && len(a.items) > 0 {
-		body += "\n" + theme.Label.Render("DETAIL") + "\n" + detailFor(a.resource, a.items[a.cursor])
+		detail = theme.Label.Render("DETAIL") + "\n" + detailFor(a.resource, a.items[a.cursor])
+		detailH = lipgloss.Height(detail) + 1
 	}
-	return body
+	rowBudget := maxH - detailH
+	if rowBudget < 1 {
+		rowBudget = 1
+	}
+	t := a.renderTable(rowBudget)
+	if detail == "" {
+		return t
+	}
+	return t + "\n" + detail
+}
+
+// renderTable builds a lipgloss table with headers and a highlighted cursor row.
+func (a *app) renderTable(maxRows int) string {
+	var headers []string
+	var fields []registry.Field
+	for _, f := range a.resource.Fields {
+		if f.Table.Header == "" || f.Table.Wide {
+			continue
+		}
+		headers = append(headers, f.Table.Header)
+		fields = append(fields, f)
+	}
+	// Leave one header row in the budget.
+	visible := maxRows - 1
+	if visible < 1 {
+		visible = 1
+	}
+	start := 0
+	if a.cursor >= visible {
+		start = a.cursor - visible + 1
+	}
+	end := start + visible
+	if end > len(a.items) {
+		end = len(a.items)
+	}
+	var rows [][]string
+	cursorRow := -1
+	for i := start; i < end; i++ {
+		rv := reflectIndirect(a.items[i])
+		row := make([]string, len(fields))
+		for j, f := range fields {
+			row[j] = readField(rv, f)
+		}
+		if i == a.cursor {
+			cursorRow = i - start
+		}
+		rows = append(rows, row)
+	}
+	t := table.New().
+		Headers(headers...).
+		Rows(rows...).
+		Border(lipgloss.HiddenBorder()).
+		StyleFunc(func(row, _ int) lipgloss.Style {
+			switch {
+			case row == table.HeaderRow:
+				return theme.Label.PaddingRight(2)
+			case row == cursorRow:
+				return lipgloss.NewStyle().
+					Foreground(theme.Text).
+					Background(theme.Subtle).
+					Bold(true).
+					PaddingRight(2)
+			default:
+				return lipgloss.NewStyle().PaddingRight(2)
+			}
+		})
+	return t.Render()
 }
 
 func (a *app) renderStatusBar() string {
@@ -296,14 +413,18 @@ func (a *app) renderStatusBar() string {
 		theme.Key.Render("enter") + " detail",
 		theme.Key.Render("q") + " quit",
 	}
-	bar := ""
+	bar := " "
 	for i, k := range keys {
 		if i > 0 {
 			bar += theme.MutedText.Render("  ·  ")
 		}
 		bar += k
 	}
-	return lipgloss.NewStyle().Width(a.width).Render(bar)
+	// Pad to full width so the background fills the row.
+	return lipgloss.NewStyle().
+		Width(a.width).
+		Background(theme.Subtle).
+		Render(bar)
 }
 
 // dismissSagaMsg clears the saga overlay after the auto-dismiss timer fires.

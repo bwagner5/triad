@@ -5,7 +5,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"github.com/bwagner5/go-cli-template/pkg/runtime"
 	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
 )
@@ -60,7 +59,7 @@ func (s *sagaOverlay) DismissAfter() tea.Cmd {
 	return tea.Tick(d, func(_ time.Time) tea.Msg { return dismissSagaMsg{} })
 }
 
-func (s *sagaOverlay) Layer(w, h int) *lipgloss.Layer {
+func (s *sagaOverlay) Box(w, _ int) string {
 	header := theme.Heading.Render("Running: " + s.name)
 	lines := header + "\n\n"
 	for _, e := range s.events {
@@ -93,8 +92,5 @@ func (s *sagaOverlay) Layer(w, h int) *lipgloss.Layer {
 	if w < width+4 {
 		width = w - 4
 	}
-	box := theme.Border.Width(width).Render(lines)
-	x := (w - lipgloss.Width(box)) / 2
-	y := (h - lipgloss.Height(box)) / 2
-	return lipgloss.NewLayer(box).X(x).Y(y).Z(4)
+	return theme.Border.Width(width).Render(lines)
 }

@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"charm.land/lipgloss/v2"
 	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
 )
 
@@ -10,7 +9,7 @@ type helpOverlay struct{}
 
 func newHelp() helpOverlay { return helpOverlay{} }
 
-func (helpOverlay) Layer(w, h int) *lipgloss.Layer {
+func (helpOverlay) Box(w, _ int) string {
 	sections := [][2]string{
 		{"Navigation", "j/k or ↑/↓ move · enter open detail · esc back"},
 		{"Actions", "r refresh · : command palette"},
@@ -27,8 +26,5 @@ func (helpOverlay) Layer(w, h int) *lipgloss.Layer {
 	if w < width+4 {
 		width = w - 4
 	}
-	box := theme.Border.Width(width).Render(s)
-	x := (w - lipgloss.Width(box)) / 2
-	y := (h - lipgloss.Height(box)) / 2
-	return lipgloss.NewLayer(box).X(x).Y(y).Z(3)
+	return theme.Border.Width(width).Render(s)
 }

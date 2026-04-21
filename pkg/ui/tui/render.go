@@ -9,19 +9,6 @@ import (
 	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
 )
 
-// summarize produces a one-line representation of an item using the resource's table fields.
-func summarize(res *registry.Resource, item any) string {
-	rv := reflect.Indirect(reflect.ValueOf(item))
-	var parts []string
-	for _, f := range res.Fields {
-		if f.Table.Header == "" {
-			continue
-		}
-		parts = append(parts, read(rv, f))
-	}
-	return strings.Join(parts, "  ")
-}
-
 // detailFor renders a full field-by-field view of an item.
 func detailFor(res *registry.Resource, item any) string {
 	rv := reflect.Indirect(reflect.ValueOf(item))

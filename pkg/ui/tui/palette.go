@@ -5,7 +5,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/textinput"
-	"charm.land/lipgloss/v2"
 	"github.com/bwagner5/go-cli-template/pkg/registry"
 	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
 	"github.com/sahilm/fuzzy"
@@ -116,7 +115,7 @@ func (m paletteModel) Update(msg tea.Msg) (paletteModel, tea.Cmd) {
 	return m, cmd
 }
 
-func (m paletteModel) Layer(w, h int) *lipgloss.Layer {
+func (m paletteModel) Box(w, _ int) string {
 	width := w * 2 / 3
 	if width < 40 {
 		width = 40
@@ -143,8 +142,5 @@ func (m paletteModel) Layer(w, h int) *lipgloss.Layer {
 		}
 		rows += fmt.Sprintf("%s%s %s  %s\n", prefix, tag, e.display, theme.MutedText.Render(e.short))
 	}
-	content := theme.Border.Width(width).Render(m.ti.View() + "\n" + rows)
-	x := (w - lipgloss.Width(content)) / 2
-	y := h / 6
-	return lipgloss.NewLayer(content).X(x).Y(y).Z(2)
+	return theme.Border.Width(width).Render(m.ti.View() + "\n" + rows)
 }
