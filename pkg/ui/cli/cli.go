@@ -97,44 +97,45 @@ func resourceCmd(res registry.Resource, g *Globals) *cobra.Command {
 		},
 	})
 
-	for _, saga := range res.Sagas {
-		c.AddCommand(sagaCmd(res, saga, g))
-	}
-	for _, act := range res.Actions {
-		c.AddCommand(actionCmd(res, act, g))
+	for _, op := range res.Operations {
+		if len(op.Steps) > 0 {
+			c.AddCommand(sagaCmd(res, op, g))
+		} else if op.Run != nil {
+			c.AddCommand(actionCmd(res, op, g))
+		}
 	}
 	return c
 }
 
-func sagaCmd(res registry.Resource, saga registry.Saga, g *Globals) *cobra.Command {
+func sagaCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Command {
 	in := registry.Input{}
 	c := &cobra.Command{
-		Use:   saga.Name,
-		Short: saga.Short,
+		Use:   op.Name,
+		Short: op.Short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := completeInput(cmd.Context(), saga.Fields, in, g.Interactive()); err != nil {
+			if err := completeInput(cmd.Context(), op.Fields, in, g.Interactive()); err != nil {
 				return err
 			}
-			return streamSaga(cmd.Context(), res, saga, in, g.Interactive())
+			return streamSaga(cmd.Context(), res, op, in, g.Interactive())
 		},
 	}
-	bindFields(c, saga.Fields, in)
+	bindFields(c, op.Fields, in)
 	return c
 }
 
-func actionCmd(res registry.Resource, act registry.Action, g *Globals) *cobra.Command {
+func actionCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Command {
 	in := registry.Input{}
 	c := &cobra.Command{
-		Use:   act.Verb,
-		Short: act.Short,
+		Use:   op.Name,
+		Short: op.Short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := completeInput(cmd.Context(), act.Fields, in, g.Interactive()); err != nil {
+			if err := completeInput(cmd.Context(), op.Fields, in, g.Interactive()); err != nil {
 				return err
 			}
-			return act.Run(cmd.Context(), in)
+			return op.Run(cmd.Context(), in)
 		},
 	}
-	bindFields(c, act.Fields, in)
+	bindFields(c, op.Fields, in)
 	return c
 }
 
@@ -199,8 +200,8 @@ func completeInput(ctx context.Context, fields []registry.Field, in registry.Inp
 	return wizard.Collect(ctx, missing, in)
 }
 
-func streamSaga(ctx context.Context, res registry.Resource, saga registry.Saga, in registry.Input, interactive bool) error {
-	ch := runtime.Run(ctx, res, saga, in)
+func streamSaga(ctx context.Context, res registry.Resource, op registry.Operation, in registry.Input, interactive bool) error {
+	ch := runtime.Run(ctx, res, op, in)
 	if interactive {
 		return RenderEventsLive(ch)
 	}

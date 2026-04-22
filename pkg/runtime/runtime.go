@@ -49,37 +49,36 @@ type Event struct {
 	Done     bool // true on the final event
 }
 
-// Run executes a saga synchronously and streams events over the returned channel.
-// The channel is closed when the saga is complete.
-func Run(ctx context.Context, res registry.Resource, saga registry.Saga, in registry.Input) <-chan Event {
-	ch := make(chan Event, len(saga.Steps)+2)
+// Run executes an operation's steps synchronously and streams events over the returned channel.
+// The channel is closed when the operation is complete.
+func Run(ctx context.Context, res registry.Resource, op registry.Operation, in registry.Input) <-chan Event {
+	ch := make(chan Event, len(op.Steps)+2)
 	go func() {
 		defer close(ch)
 		st := &registry.State{Input: in, Data: map[string]any{}}
-		total := len(saga.Steps)
+		total := len(op.Steps)
 		var runErr error
 		var lastIdx int
-		for i, step := range saga.Steps {
+		for i, step := range op.Steps {
 			lastIdx = i
 			if step.Skip != nil && step.Skip(st) {
-				ch <- Event{Saga: saga.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Skipped, At: time.Now()}
+				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Skipped, At: time.Now()}
 				continue
 			}
-			ch <- Event{Saga: saga.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Running, At: time.Now()}
+			ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Running, At: time.Now()}
 			if err := step.Do(ctx, st); err != nil {
-				ch <- Event{Saga: saga.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Failed, Err: err, At: time.Now()}
+				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Failed, Err: err, At: time.Now()}
 				runErr = err
-				// Best-effort undo of prior steps, in reverse.
 				for j := i - 1; j >= 0; j-- {
-					if saga.Steps[j].Undo != nil {
-						_ = saga.Steps[j].Undo(ctx, st)
+					if op.Steps[j].Undo != nil {
+						_ = op.Steps[j].Undo(ctx, st)
 					}
 				}
 				break
 			}
-			ch <- Event{Saga: saga.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: OK, At: time.Now()}
+			ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: OK, At: time.Now()}
 		}
-		final := Event{Saga: saga.Name, Resource: res.Name, Index: -1, Total: total, Status: OK, At: time.Now(), Done: true}
+		final := Event{Saga: op.Name, Resource: res.Name, Index: -1, Total: total, Status: OK, At: time.Now(), Done: true}
 		if runErr != nil {
 			final.Status = Failed
 			final.Err = runErr

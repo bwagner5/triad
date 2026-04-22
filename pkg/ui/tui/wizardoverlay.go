@@ -17,7 +17,7 @@ type wizardOverlay struct {
 	active   bool
 	ctx      context.Context
 	resource *registry.Resource
-	saga     *registry.Saga
+	op       *registry.Operation
 	fields   []registry.Field
 	input    registry.Input
 	idx      int // focused field
@@ -39,11 +39,11 @@ func newWizardOverlay() wizardOverlay {
 func (wo *wizardOverlay) Active() bool     { return wo.active }
 func (wo *wizardOverlay) SetSize(w, h int) { wo.w, wo.h = w, h }
 
-func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, saga *registry.Saga, fields []registry.Field, input registry.Input) tea.Cmd {
+func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *registry.Operation, fields []registry.Field, input registry.Input) tea.Cmd {
 	wo.active = true
 	wo.ctx = ctx
 	wo.resource = res
-	wo.saga = saga
+	wo.op = op
 	wo.fields = fields
 	wo.input = input
 	wo.idx = 0
@@ -143,7 +143,7 @@ func (wo *wizardOverlay) submit() tea.Cmd {
 	}
 	wo.active = false
 	return func() tea.Msg {
-		return wizardDoneMsg{resource: wo.resource, saga: wo.saga, input: wo.input}
+		return wizardDoneMsg{resource: wo.resource, op: wo.op, input: wo.input}
 	}
 }
 
@@ -160,7 +160,7 @@ func (wo *wizardOverlay) fieldValue(i int) string {
 // wizardDoneMsg is posted when the wizard overlay finishes collecting all fields.
 type wizardDoneMsg struct {
 	resource *registry.Resource
-	saga     *registry.Saga
+	op       *registry.Operation
 	input    registry.Input
 }
 
@@ -249,13 +249,13 @@ func (wo *wizardOverlay) Box(w, h int) string {
 		width = w - 4
 	}
 
-	sagaName := ""
-	if wo.saga != nil {
-		sagaName = wo.saga.Name
+	opName := ""
+	if wo.op != nil {
+		opName = wo.op.Name
 	}
 
 	var body strings.Builder
-	body.WriteString(theme.Heading.Render(sagaName) + "\n\n")
+	body.WriteString(theme.Heading.Render(opName) + "\n\n")
 
 	for i, f := range wo.fields {
 		focused := i == wo.idx

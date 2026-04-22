@@ -14,18 +14,18 @@ type confirmOverlay struct {
 	prompt   string
 	yes      bool // cursor: true = Yes selected
 	resource *registry.Resource
-	saga     *registry.Saga
+	op       *registry.Operation
 	input    registry.Input
 }
 
 func (c *confirmOverlay) Active() bool { return c.active }
 
-func (c *confirmOverlay) Show(prompt string, res *registry.Resource, saga *registry.Saga, input registry.Input) {
+func (c *confirmOverlay) Show(prompt string, res *registry.Resource, op *registry.Operation, input registry.Input) {
 	c.active = true
 	c.prompt = prompt
 	c.yes = false
 	c.resource = res
-	c.saga = saga
+	c.op = op
 	c.input = input
 }
 

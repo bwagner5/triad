@@ -19,6 +19,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
 	"github.com/bwagner5/go-cli-template/pkg/duration"
@@ -87,6 +88,11 @@ type app struct {
 
 	showPalette bool
 	showHelp    bool
+
+	// Table filter (activated by "/").
+	filtering  bool
+	filterText string
+	filterTI   textinput.Model
 }
 
 func newApp(ctx context.Context, reg *registry.Registry, opts Options) *app {
@@ -97,6 +103,10 @@ func newApp(ctx context.Context, reg *registry.Registry, opts Options) *app {
 		opts.Logo = lipgloss.NewStyle().Foreground(theme.Warning).Render(ascii.Render(opts.Name))
 	}
 	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), palette: newPalette(reg), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New(), initialLoad: true}
+	fti := textinput.New()
+	fti.Prompt = "/ "
+	fti.Placeholder = "filter…"
+	a.filterTI = fti
 	if all := reg.All(); len(all) > 0 {
 		r := all[0]
 		a.resource = &r
@@ -197,13 +207,13 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case startSagaMsg:
 		return a, a.startSaga(msg)
 	case wizardDoneMsg:
-		// Wizard finished collecting fields. Check if saga needs confirmation.
-		if msg.saga != nil && msg.saga.Confirm != "" {
-			a.confirm.Show(msg.saga.Confirm, msg.resource, msg.saga, msg.input)
+		// Wizard finished collecting fields. Check if op needs confirmation.
+		if msg.op != nil && msg.op.Confirm != "" {
+			a.confirm.Show(msg.op.Confirm, msg.resource, msg.op, msg.input)
 			return a, nil
 		}
 		return a, func() tea.Msg {
-			return startSagaMsg{resource: msg.resource, saga: msg.saga, input: msg.input}
+			return startSagaMsg{resource: msg.resource, op: msg.op, input: msg.input}
 		}
 	case wizardSuggestMsg:
 		if a.wizard.Active() {
@@ -228,6 +238,11 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, cmd
 		}
 	}
+	if a.filtering {
+		var cmd tea.Cmd
+		a.filterTI, cmd = a.filterTI.Update(msg)
+		return a, cmd
+	}
 	return a, nil
 }
 
@@ -242,7 +257,7 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				return a, func() tea.Msg {
 					return startSagaMsg{
 						resource: a.confirm.resource,
-						saga:     a.confirm.saga,
+						op:       a.confirm.op,
 						input:    a.confirm.input,
 					}
 				}
@@ -287,6 +302,30 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Quit
 	}
 
+	// Filter mode: text input active.
+	if a.filtering {
+		switch key {
+		case "esc":
+			a.filtering = false
+			a.filterText = ""
+			a.filterTI.SetValue("")
+			a.filterTI.Blur()
+			a.cursor = 0
+			return a, nil
+		case "enter":
+			a.filtering = false
+			a.filterText = a.filterTI.Value()
+			a.filterTI.Blur()
+			a.cursor = 0
+			return a, nil
+		}
+		var cmd tea.Cmd
+		a.filterTI, cmd = a.filterTI.Update(msg)
+		a.filterText = a.filterTI.Value()
+		a.cursor = 0
+		return a, cmd
+	}
+
 	// Arrow-key aliases for j/k navigation.
 	switch key {
 	case "up":
@@ -303,6 +342,7 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.resource = &all[idx]
 			a.mode = modeList
 			a.cursor = 0
+			a.filterText = ""
 			return a, a.refresh()
 		}
 	}
@@ -323,6 +363,7 @@ func (a *app) handlePaletteChoice(msg paletteResultMsg) (tea.Model, tea.Cmd) {
 		a.resource = e.resource
 		a.mode = modeList
 		a.cursor = 0
+		a.filterText = ""
 		return a, a.refresh()
 	}
 	return a, nil
@@ -499,6 +540,11 @@ func (a *app) renderBody(w, h int) string {
 		count = len(a.items)
 	}
 	titleStr := theme.Heading.Render(title) + theme.MutedText.Render(fmt.Sprintf("[%d]", count))
+	if a.filtering {
+		titleStr += "  " + a.filterTI.View()
+	} else if a.filterText != "" {
+		titleStr += "  " + theme.MutedText.Render("/"+a.filterText)
+	}
 	if a.mode == modeDetail && a.resource != nil && len(a.items) > 0 {
 		id := detailID(a.resource, a.items[a.cursor])
 		titleStr = theme.Heading.Render(a.resource.Name) + theme.MutedText.Render("/") + theme.Value.Render(id)
@@ -569,6 +615,27 @@ func (a *app) refreshFooter() string {
 	return theme.MutedText.Render(fmt.Sprintf(" Refresh in %s │ Last Refresh: %s ago ", duration.Short(next), duration.Short(since)))
 }
 
+func (a *app) filteredItems() []any {
+	if a.filterText == "" {
+		return a.items
+	}
+	q := strings.ToLower(a.filterText)
+	var out []any
+	for _, item := range a.items {
+		rv := reflectIndirect(item)
+		for _, f := range a.resource.Fields {
+			if f.Table.Header == "" {
+				continue
+			}
+			if strings.Contains(strings.ToLower(readField(rv, f)), q) {
+				out = append(out, item)
+				break
+			}
+		}
+	}
+	return out
+}
+
 func (a *app) renderList(maxW, maxH int) string {
 	if a.resource == nil {
 		return theme.MutedText.Render("no resources registered")
@@ -586,11 +653,15 @@ func (a *app) renderList(maxW, maxH int) string {
 	if len(a.items) == 0 {
 		return theme.MutedText.Render(fmt.Sprintf("No %s to display…", a.resource.Plural))
 	}
-	return a.renderTable(maxH, maxW)
+	filtered := a.filteredItems()
+	if len(filtered) == 0 {
+		return theme.MutedText.Render(fmt.Sprintf("No %s matching %q", a.resource.Plural, a.filterText))
+	}
+	return a.renderTable(filtered, maxH, maxW)
 }
 
 // renderTable builds a lipgloss table with headers and a highlighted cursor row.
-func (a *app) renderTable(maxRows, maxW int) string {
+func (a *app) renderTable(items []any, maxRows, maxW int) string {
 	var headers []string
 	var fields []registry.Field
 	for _, f := range a.resource.Fields {
@@ -609,13 +680,13 @@ func (a *app) renderTable(maxRows, maxW int) string {
 		start = a.cursor - visible + 1
 	}
 	end := start + visible
-	if end > len(a.items) {
-		end = len(a.items)
+	if end > len(items) {
+		end = len(items)
 	}
 	var rows [][]string
 	cursorRow := -1
 	for i := start; i < end; i++ {
-		rv := reflectIndirect(a.items[i])
+		rv := reflectIndirect(items[i])
 		row := make([]string, len(fields))
 		for j, f := range fields {
 			row[j] = readField(rv, f)

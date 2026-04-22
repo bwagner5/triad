@@ -83,31 +83,47 @@ type Step struct {
 }
 
 // Saga is a named, ordered workflow.
-type Saga struct {
+//
+// Deprecated: Use Operation instead. Saga is kept as a type alias for migration.
+type Saga = Operation
+
+// Action is a resource-specific verb.
+//
+// Deprecated: Use Operation instead. Action is kept as a type alias for migration.
+type Action = Operation
+
+// Operation is a named verb on a resource. It unifies what were previously
+// separate Saga and Action types.
+//
+// An Operation with Steps is a multi-step workflow: the runtime executes each
+// step in order, emits progress events, and runs Undo on prior steps if one
+// fails. UIs render step-by-step progress (spinners, checkmarks).
+//
+// An Operation with only Run (no Steps) is a simple action: it executes once,
+// typically taking over the terminal for streaming output (e.g. logs, exec).
+//
+// Both kinds share the same Fields, Key, Confirm, and Short metadata so they
+// surface identically in CLI help, the wizard, and TUI key bindings.
+type Operation struct {
 	Name  string
 	Short string
-	// Key is an optional TUI key binding (e.g. "c", "ctrl+d"). When set,
-	// the TUI dispatches this key to launch the saga. Empty means the saga
-	// is available only via the command palette.
+	// Key is an optional TUI key binding (e.g. "c", "ctrl+d", "l"). When set,
+	// the TUI dispatches this key to launch the operation. Empty means the
+	// operation is available only via the command palette or CLI.
 	Key string
 	// Confirm, when non-empty, asks the user for explicit confirmation before
-	// the saga runs. Use for destructive operations (delete, restart, etc.).
+	// the operation runs. Use for destructive operations (delete, restart, etc.).
 	// The string is the prompt shown to the user.
 	Confirm string
-	// Fields are the inputs the saga needs. They map to CLI flags / wizard prompts.
+	// Fields are the inputs the operation needs. They map to CLI flags / wizard prompts.
 	Fields []Field
-	Steps  []Step
-}
-
-// Action is a resource-specific verb (e.g. container logs).
-type Action struct {
-	Verb  string
-	Short string
-	// Key is an optional TUI key binding (e.g. "l" for logs). Empty means
-	// the action is available only via the command palette.
-	Key    string
-	Fields []Field
-	// Run is invoked with the parsed input. For streaming output, write to ctx.Stdout.
+	// Steps, when non-empty, makes this a multi-step workflow. The runtime
+	// executes steps in order and emits progress events. UIs show a progress
+	// overlay. If a step fails, prior steps' Undo functions are called in reverse.
+	Steps []Step
+	// Run, when set (and Steps is empty), makes this a simple action. It
+	// executes once and writes directly to stdout. In the TUI, it runs via
+	// tea.Exec which temporarily releases the terminal.
 	Run func(ctx context.Context, in Input) error
 }
 
@@ -120,8 +136,11 @@ type Resource struct {
 	Short   string
 	Fields  []Field // columns + common identifiers
 	Store   Store
-	Sagas   map[string]Saga
-	Actions map[string]Action
+	// Operations are the verbs available on this resource (create, delete,
+	// logs, etc.). Each operation surfaces automatically in the CLI, wizard,
+	// and TUI. Operations with Steps render as multi-step workflows;
+	// operations with only Run render as simple actions.
+	Operations map[string]Operation
 }
 
 // Registry is a concurrent-safe collection of Resources.

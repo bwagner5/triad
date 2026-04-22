@@ -7,6 +7,17 @@ import (
 	"github.com/bwagner5/go-cli-template/pkg/registry"
 )
 
+// needsSelection returns true when an operation acts on an existing resource
+// (i.e. at least one field uses Suggest to pick from existing items).
+func needsSelection(op registry.Operation) bool {
+	for _, f := range op.Fields {
+		if f.Suggest != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // binding pairs a keystroke with a description and a handler. Categories
 // drive the help overlay layout.
 type binding struct {
@@ -47,43 +58,26 @@ func (a *app) keyMap() []binding {
 		}},
 	)
 
-	// ---- Resource (contextual: from current resource's sagas + actions) ----
+	// ---- Resource (contextual: from current resource's operations) ----
 	if a.resource != nil {
-		sagaNames := make([]string, 0, len(a.resource.Sagas))
-		for name := range a.resource.Sagas {
-			sagaNames = append(sagaNames, name)
+		opNames := make([]string, 0, len(a.resource.Operations))
+		for name := range a.resource.Operations {
+			opNames = append(opNames, name)
 		}
-		sort.Strings(sagaNames)
-		for _, name := range sagaNames {
-			s := a.resource.Sagas[name]
-			if s.Key == "" {
+		sort.Strings(opNames)
+		for _, name := range opNames {
+			op := a.resource.Operations[name]
+			if op.Key == "" {
 				continue
 			}
 			bs = append(bs, binding{
-				Key: s.Key, Label: s.Name, Cat: "Resource",
+				Key: op.Key, Label: op.Name, Cat: "Resource",
 				Run: func(a *app) (tea.Model, tea.Cmd) {
 					var input registry.Input
-					if s.Name == "delete" {
+					if needsSelection(op) {
 						input = a.selectedInput()
 					}
-					return a, a.launchSaga(a.resource, &s, input)
-				},
-			})
-		}
-		actNames := make([]string, 0, len(a.resource.Actions))
-		for name := range a.resource.Actions {
-			actNames = append(actNames, name)
-		}
-		sort.Strings(actNames)
-		for _, name := range actNames {
-			act := a.resource.Actions[name]
-			if act.Key == "" {
-				continue
-			}
-			bs = append(bs, binding{
-				Key: act.Key, Label: act.Verb, Cat: "Resource",
-				Run: func(a *app) (tea.Model, tea.Cmd) {
-					return a, a.launchAction(a.resource, &act, a.selectedInput())
+					return a, a.launchOp(a.resource, &op, input)
 				},
 			})
 		}
@@ -94,6 +88,11 @@ func (a *app) keyMap() []binding {
 
 	// ---- Global ----
 	bs = append(bs,
+		binding{Key: "/", Label: "filter", Cat: "Global", Run: func(a *app) (tea.Model, tea.Cmd) {
+			a.filtering = true
+			a.filterTI.SetValue(a.filterText)
+			return a, a.filterTI.Focus()
+		}},
 		binding{Key: ":", Label: "palette", Cat: "Global", Run: func(a *app) (tea.Model, tea.Cmd) {
 			a.showPalette = true
 			a.palette.Focus()

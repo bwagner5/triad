@@ -102,7 +102,7 @@ func Resource() registry.Resource {
 			{Name: "Status", Flag: "status", Help: "status", Table: registry.TableHint{Header: "STATUS", Wide: true}},
 		},
 		Store: backend,
-		Sagas: map[string]registry.Saga{
+		Operations: map[string]registry.Operation{
 			"create": {
 				Name:  "create",
 				Key:   "c",
@@ -159,10 +159,8 @@ func Resource() registry.Resource {
 					}},
 				},
 			},
-		},
-		Actions: map[string]registry.Action{
 			"logs": {
-				Verb:  "logs",
+				Name:  "logs",
 				Key:   "l",
 				Short: "stream logs",
 				Fields: []registry.Field{
