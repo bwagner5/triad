@@ -1,0 +1,25 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - errorlint
+    - gosec
+    - misspell
+    - unconvert
+    - unparam
+    - gocyclo
+    - nilerr
+
+  settings:
+    gocyclo:
+      min-complexity: 25
+    misspell:
+      locale: US
+
+run:
+  timeout: 5m
+
+issues:
+  exclude-dirs:
+    - hack

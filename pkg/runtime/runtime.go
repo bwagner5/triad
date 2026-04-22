@@ -90,7 +90,7 @@ func Run(ctx context.Context, res registry.Resource, op registry.Operation, in r
 	return ch
 }
 
-// ---- Event bus (for TUI refresh scheduler + cross-component signalling) ----
+// ---- Event bus (for TUI refresh scheduler + cross-component signaling) ----
 
 type Bus struct {
 	mu   sync.RWMutex

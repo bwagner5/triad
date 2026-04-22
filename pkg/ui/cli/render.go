@@ -62,7 +62,7 @@ func renderTable(w io.Writer, res registry.Resource, items []any, wide bool) err
 			}
 			return lipgloss.NewStyle().PaddingRight(2)
 		})
-	fmt.Fprintln(w, t.Render())
+	_, _ = fmt.Fprintln(w, t.Render())
 	return nil
 }
 
@@ -109,22 +109,22 @@ func RenderEvents(w io.Writer, ch <-chan runtime.Event) error {
 	for e := range ch {
 		if e.Done {
 			if e.Status == runtime.Failed {
-				fmt.Fprintln(w, theme.Err.Render("✗ ")+e.Saga+" failed: "+errStr(e.Err))
+				fmt.Fprintln(w, theme.Err.Render("✗ ")+e.Saga+" failed: "+errStr(e.Err)) //nolint:errcheck
 				finalErr = e.Err
 			} else {
-				fmt.Fprintln(w, theme.OK.Render("✓ ")+e.Saga+" complete")
+				fmt.Fprintln(w, theme.OK.Render("✓ ")+e.Saga+" complete") //nolint:errcheck
 			}
 			continue
 		}
 		switch e.Status {
 		case runtime.Running:
-			fmt.Fprintf(w, "%s %s\n", theme.RunMark, e.Step)
+			_, _ = fmt.Fprintf(w, "%s %s\n", theme.RunMark, e.Step)
 		case runtime.OK:
-			fmt.Fprintf(w, "%s %s\n", theme.OKMark, e.Step)
+			_, _ = fmt.Fprintf(w, "%s %s\n", theme.OKMark, e.Step)
 		case runtime.Failed:
-			fmt.Fprintf(w, "%s %s — %s\n", theme.ErrMark, e.Step, errStr(e.Err))
+			_, _ = fmt.Fprintf(w, "%s %s — %s\n", theme.ErrMark, e.Step, errStr(e.Err))
 		case runtime.Skipped:
-			fmt.Fprintf(w, "%s %s (skipped)\n", theme.SkipMark, e.Step)
+			_, _ = fmt.Fprintf(w, "%s %s (skipped)\n", theme.SkipMark, e.Step)
 		}
 	}
 	return finalErr

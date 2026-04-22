@@ -123,7 +123,7 @@ func sagaCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 	return c
 }
 
-func actionCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Command {
+func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Command {
 	in := registry.Input{}
 	c := &cobra.Command{
 		Use:   op.Name,

@@ -188,33 +188,14 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case sagaEventMsg:
-		ev := runtime.Event(msg)
-		a.saga.Push(ev)
-		if ev.Done {
-			a.sched.Bump(ev.Resource)
-			var toastCmd tea.Cmd
-			if ev.Err != nil {
-				toastCmd = a.showToast(toastErr, fmt.Sprintf("%s failed: %s", ev.Saga, ev.Err.Error()))
-			} else {
-				toastCmd = a.showToast(toastOK, fmt.Sprintf("%s succeeded", ev.Saga))
-			}
-			return a, tea.Batch(a.saga.DismissAfter(), a.refresh(), a.subscribeBus(), toastCmd)
-		}
-		return a, a.subscribeBus()
+		return a.handleSagaEvent(runtime.Event(msg))
 	case paletteResultMsg:
 		a.showPalette = false
 		return a.handlePaletteChoice(msg)
 	case startSagaMsg:
 		return a, a.startSaga(msg)
 	case wizardDoneMsg:
-		// Wizard finished collecting fields. Check if op needs confirmation.
-		if msg.op != nil && msg.op.Confirm != "" {
-			a.confirm.Show(msg.op.Confirm, msg.resource, msg.op, msg.input)
-			return a, nil
-		}
-		return a, func() tea.Msg {
-			return startSagaMsg{resource: msg.resource, op: msg.op, input: msg.input}
-		}
+		return a.handleWizardDone(msg)
 	case wizardSuggestMsg:
 		if a.wizard.Active() {
 			a.wizard.Update(msg)
@@ -304,26 +285,7 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Filter mode: text input active.
 	if a.filtering {
-		switch key {
-		case "esc":
-			a.filtering = false
-			a.filterText = ""
-			a.filterTI.SetValue("")
-			a.filterTI.Blur()
-			a.cursor = 0
-			return a, nil
-		case "enter":
-			a.filtering = false
-			a.filterText = a.filterTI.Value()
-			a.filterTI.Blur()
-			a.cursor = 0
-			return a, nil
-		}
-		var cmd tea.Cmd
-		a.filterTI, cmd = a.filterTI.Update(msg)
-		a.filterText = a.filterTI.Value()
-		a.cursor = 0
-		return a, cmd
+		return a.handleFilterKey(msg)
 	}
 
 	// Arrow-key aliases for j/k navigation.
@@ -353,6 +315,39 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
+	if msg.op != nil && msg.op.Confirm != "" {
+		a.confirm.Show(msg.op.Confirm, msg.resource, msg.op, msg.input)
+		return a, nil
+	}
+	return a, func() tea.Msg {
+		return startSagaMsg{resource: msg.resource, op: msg.op, input: msg.input}
+	}
+}
+
+func (a *app) handleFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		a.filtering = false
+		a.filterText = ""
+		a.filterTI.SetValue("")
+		a.filterTI.Blur()
+		a.cursor = 0
+		return a, nil
+	case "enter":
+		a.filtering = false
+		a.filterText = a.filterTI.Value()
+		a.filterTI.Blur()
+		a.cursor = 0
+		return a, nil
+	}
+	var cmd tea.Cmd
+	a.filterTI, cmd = a.filterTI.Update(msg)
+	a.filterText = a.filterTI.Value()
+	a.cursor = 0
+	return a, cmd
+}
+
 func (a *app) handlePaletteChoice(msg paletteResultMsg) (tea.Model, tea.Cmd) {
 	if msg.canceled || msg.entry == nil {
 		return a, nil
@@ -367,6 +362,21 @@ func (a *app) handlePaletteChoice(msg paletteResultMsg) (tea.Model, tea.Cmd) {
 		return a, a.refresh()
 	}
 	return a, nil
+}
+
+func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
+	a.saga.Push(ev)
+	if ev.Done {
+		a.sched.Bump(ev.Resource)
+		var toastCmd tea.Cmd
+		if ev.Err != nil {
+			toastCmd = a.showToast(toastErr, fmt.Sprintf("%s failed: %s", ev.Saga, ev.Err.Error()))
+		} else {
+			toastCmd = a.showToast(toastOK, fmt.Sprintf("%s succeeded", ev.Saga))
+		}
+		return a, tea.Batch(a.saga.DismissAfter(), a.refresh(), a.subscribeBus(), toastCmd)
+	}
+	return a, a.subscribeBus()
 }
 
 // subscribeBus relays saga events (from CLI-originated sagas, if any) into the TUI.
@@ -702,10 +712,10 @@ func (a *app) renderTable(items []any, maxRows, maxW int) string {
 		Rows(rows...).
 		Border(lipgloss.HiddenBorder()).
 		StyleFunc(func(row, _ int) lipgloss.Style {
-			switch {
-			case row == table.HeaderRow:
+			switch row {
+			case table.HeaderRow:
 				return theme.Label.PaddingRight(2)
-			case row == cursorRow:
+			case cursorRow:
 				return lipgloss.NewStyle().
 					Foreground(theme.Text).
 					Background(theme.Subtle).

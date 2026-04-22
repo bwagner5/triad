@@ -13,7 +13,7 @@ import (
 func InstallHelp(root *cobra.Command) {
 	root.SetUsageFunc(styledUsage)
 	root.SetHelpFunc(func(cmd *cobra.Command, _ []string) {
-		fmt.Fprintln(cmd.OutOrStdout(), styledHelp(cmd))
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), styledHelp(cmd))
 	})
 	// Typo suggestions: cobra already emits "did you mean", we wrap its output.
 	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
@@ -22,7 +22,7 @@ func InstallHelp(root *cobra.Command) {
 }
 
 func styledUsage(cmd *cobra.Command) error {
-	fmt.Fprintln(cmd.OutOrStderr(), styledHelp(cmd))
+	_, _ = fmt.Fprintln(cmd.OutOrStderr(), styledHelp(cmd))
 	return nil
 }
 

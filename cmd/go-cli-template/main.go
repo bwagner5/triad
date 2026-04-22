@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 
+	"github.com/bwagner5/go-cli-template/pkg/attribution"
 	"github.com/bwagner5/go-cli-template/pkg/registry"
 	"github.com/bwagner5/go-cli-template/pkg/resources/container"
 	"github.com/bwagner5/go-cli-template/pkg/ui/cli"
@@ -37,6 +39,14 @@ func main() {
 		Short:   "launch the full-screen TUI",
 		GroupID: "interface",
 		RunE:    runTUI,
+	})
+	root.AddCommand(&cobra.Command{
+		Use:   "attribution",
+		Short: "print open-source dependency licenses",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Print(attribution.Text)
+			return nil
+		},
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

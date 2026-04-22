@@ -333,25 +333,58 @@ tui.Run(ctx, reg, tui.Options{
 ```bash
 make build          # Build to ./build/
 make test           # Run tests
-make lint           # Run golangci-lint
+make lint           # Run golangci-lint (v2 config)
+make attribution    # Generate ATTRIBUTION.md from dependency licenses
+make release        # Local snapshot release via goreleaser (no publish)
+make clean          # Remove build artifacts
 ```
 
-Releases use [goreleaser](https://goreleaser.com/) via GitHub Actions. Tag a version to trigger:
+### Dev Loop
+
+```bash
+# Build and run
+make build && ./build/go-cli-template --help
+
+# Run directly during development
+go run ./cmd/go-cli-template container
+
+# Run tests
+make test
+
+# Lint (install golangci-lint first: https://golangci-lint.run/docs/welcome/install/)
+make lint
+```
+
+### Releasing
+
+Releases are driven by [goreleaser](https://goreleaser.com/) via GitHub Actions. Tag a version to trigger a release:
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-goreleaser publishes binaries, archives, deb/rpm packages, and a Homebrew formula. The Homebrew tap requires a `MY_GITHUB_TOKEN` secret with `repo` permissions (GitHub Actions tokens can't push to other repos).
+This builds binaries for linux/darwin × amd64/arm64, creates archives, and publishes them as GitHub release assets with a changelog.
+
+To test the release locally without publishing:
+
+```bash
+make release
+ls dist/
+```
+
+### Attribution
+
+The CLI ships with an `--attribution` flag that prints open-source dependency licenses. To regenerate after changing dependencies:
+
+```bash
+make attribution    # generates ATTRIBUTION.md and copies it into the embed directory
+go run ./cmd/go-cli-template --attribution
+```
 
 ## Installation
 
-```bash
-brew install <owner>/tap/<cli-name>
-```
-
-Or download directly:
+Download from [GitHub Releases](https://github.com/<owner>/<cli-name>/releases):
 
 ```bash
 [[ $(uname -m) == "aarch64" ]] && ARCH="arm64" || ARCH="amd64"
