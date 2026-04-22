@@ -73,6 +73,7 @@ type app struct {
 	lastRefresh time.Time
 	nextRefresh time.Time
 	refreshing  bool
+	initialLoad bool
 	spin        spinner.Model
 
 	// Toast flash messages (top of screen).
@@ -95,7 +96,7 @@ func newApp(ctx context.Context, reg *registry.Registry, opts Options) *app {
 	if opts.Logo == "" {
 		opts.Logo = lipgloss.NewStyle().Foreground(theme.Warning).Render(ascii.Render(opts.Name))
 	}
-	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), palette: newPalette(reg), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New()}
+	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), palette: newPalette(reg), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New(), initialLoad: true}
 	if all := reg.All(); len(all) > 0 {
 		r := all[0]
 		a.resource = &r
@@ -159,6 +160,7 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.resource != nil && msg.resource == a.resource.Name {
 			a.items, a.err = msg.items, msg.err
 			a.refreshing = false
+			a.initialLoad = false
 			if a.cursor >= len(a.items) {
 				a.cursor = 0
 			}
@@ -322,10 +324,6 @@ func (a *app) handlePaletteChoice(msg paletteResultMsg) (tea.Model, tea.Cmd) {
 		a.mode = modeList
 		a.cursor = 0
 		return a, a.refresh()
-	case paletteAction, paletteSaga:
-		if e.saga != nil && e.resource != nil {
-			return a, a.launchSaga(e.resource, e.saga, nil)
-		}
 	}
 	return a, nil
 }
@@ -580,6 +578,10 @@ func (a *app) renderList(maxW, maxH int) string {
 	}
 	if a.mode == modeDetail && len(a.items) > 0 {
 		return detailFor(a.resource, a.items[a.cursor])
+	}
+	if len(a.items) == 0 && a.initialLoad {
+		return lipgloss.Place(maxW, maxH, lipgloss.Center, lipgloss.Center,
+			a.spin.View()+"  "+theme.MutedText.Render("Loading "+a.resource.Plural+"…"))
 	}
 	if len(a.items) == 0 {
 		return theme.MutedText.Render(fmt.Sprintf("No %s to display…", a.resource.Plural))

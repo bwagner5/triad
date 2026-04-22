@@ -48,8 +48,15 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 	InstallHelp(root)
 	root.SuggestionsMinimumDistance = 2
 
+	root.AddGroup(
+		&cobra.Group{ID: "resources", Title: "Resources:"},
+		&cobra.Group{ID: "interface", Title: "Interface:"},
+	)
+
 	for _, res := range reg.All() {
-		root.AddCommand(resourceCmd(res, g))
+		cmd := resourceCmd(res, g)
+		cmd.GroupID = "resources"
+		root.AddCommand(cmd)
 	}
 	return root
 }

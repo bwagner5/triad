@@ -46,27 +46,53 @@ func styledHelp(cmd *cobra.Command) string {
 	b.WriteString("\n\n")
 
 	if cmd.HasAvailableSubCommands() {
-		b.WriteString(theme.Label.Render("COMMANDS"))
-		b.WriteString("\n")
-		max := 0
-		for _, sc := range cmd.Commands() {
-			if !sc.IsAvailableCommand() {
-				continue
+		groups := cmd.Groups()
+		if len(groups) > 0 {
+			// Render grouped commands.
+			for _, g := range groups {
+				cmds := groupCommands(cmd, g.ID)
+				if len(cmds) == 0 {
+					continue
+				}
+				b.WriteString(theme.Label.Render(strings.ToUpper(g.Title)))
+				b.WriteString("\n")
+				max := maxNameLen(cmds)
+				for _, sc := range cmds {
+					fmt.Fprintf(&b, "  %s  %s\n",
+						theme.Key.Render(padRight(sc.Name(), max)),
+						theme.MutedText.Render(sc.Short),
+					)
+				}
+				b.WriteString("\n")
 			}
-			if n := len(sc.Name()); n > max {
-				max = n
+			// Ungrouped commands (completion, help, etc.).
+			ungrouped := groupCommands(cmd, "")
+			if len(ungrouped) > 0 {
+				b.WriteString(theme.Label.Render("ADDITIONAL COMMANDS"))
+				b.WriteString("\n")
+				max := maxNameLen(ungrouped)
+				for _, sc := range ungrouped {
+					fmt.Fprintf(&b, "  %s  %s\n",
+						theme.Key.Render(padRight(sc.Name(), max)),
+						theme.MutedText.Render(sc.Short),
+					)
+				}
+				b.WriteString("\n")
 			}
+		} else {
+			// No groups defined — flat list.
+			b.WriteString(theme.Label.Render("COMMANDS"))
+			b.WriteString("\n")
+			avail := availableCommands(cmd)
+			max := maxNameLen(avail)
+			for _, sc := range avail {
+				fmt.Fprintf(&b, "  %s  %s\n",
+					theme.Key.Render(padRight(sc.Name(), max)),
+					theme.MutedText.Render(sc.Short),
+				)
+			}
+			b.WriteString("\n")
 		}
-		for _, sc := range cmd.Commands() {
-			if !sc.IsAvailableCommand() {
-				continue
-			}
-			fmt.Fprintf(&b, "  %s  %s\n",
-				theme.Key.Render(padRight(sc.Name(), max)),
-				theme.MutedText.Render(sc.Short),
-			)
-		}
-		b.WriteString("\n")
 	}
 
 	if cmd.HasAvailableLocalFlags() {
@@ -97,6 +123,41 @@ func padRight(s string, n int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", n-len(s))
+}
+
+func availableCommands(cmd *cobra.Command) []*cobra.Command {
+	var out []*cobra.Command
+	for _, sc := range cmd.Commands() {
+		if sc.IsAvailableCommand() {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
+func groupCommands(cmd *cobra.Command, groupID string) []*cobra.Command {
+	var out []*cobra.Command
+	for _, sc := range cmd.Commands() {
+		if !sc.IsAvailableCommand() {
+			continue
+		}
+		if groupID == "" && sc.GroupID == "" {
+			out = append(out, sc)
+		} else if sc.GroupID == groupID {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
+func maxNameLen(cmds []*cobra.Command) int {
+	max := 0
+	for _, c := range cmds {
+		if n := len(c.Name()); n > max {
+			max = n
+		}
+	}
+	return max
 }
 
 func indent(s, prefix string) string {

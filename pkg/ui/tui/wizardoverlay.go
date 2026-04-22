@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -12,8 +11,8 @@ import (
 	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
 )
 
-// wizardOverlay is a full-screen form overlay that collects saga fields
-// one at a time, replacing the tea.Exec inline wizard approach.
+// wizardOverlay is a form overlay that shows all fields at once.
+// The focused field is editable; tab/shift-tab moves between fields.
 type wizardOverlay struct {
 	active   bool
 	ctx      context.Context
@@ -21,29 +20,20 @@ type wizardOverlay struct {
 	saga     *registry.Saga
 	fields   []registry.Field
 	input    registry.Input
-	idx      int // current field index
+	idx      int // focused field
 
-	ti      textinput.Model
+	inputs  []textinput.Model // one per field
 	spin    spinner.Model
-	loading bool
-	choices []registry.Choice
-	selIdx  int
+	loading []bool             // per-field loading state
+	choices [][]registry.Choice // per-field choices
+	selIdx  []int              // per-field selection cursor
 
-	committed []committedField // already-answered fields
-	err       error
-	w, h      int
-}
-
-type committedField struct {
-	flag string
-	val  string
+	errs []string // per-field validation error
+	w, h int
 }
 
 func newWizardOverlay() wizardOverlay {
-	ti := textinput.New()
-	ti.Prompt = "› "
-	sp := spinner.New()
-	return wizardOverlay{ti: ti, spin: sp}
+	return wizardOverlay{spin: spinner.New()}
 }
 
 func (wo *wizardOverlay) Active() bool     { return wo.active }
@@ -57,53 +47,43 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, saga 
 	wo.fields = fields
 	wo.input = input
 	wo.idx = 0
-	wo.committed = nil
-	wo.err = nil
-	return tea.Batch(wo.startField(), wo.spin.Tick)
+
+	n := len(fields)
+	wo.inputs = make([]textinput.Model, n)
+	wo.loading = make([]bool, n)
+	wo.choices = make([][]registry.Choice, n)
+	wo.selIdx = make([]int, n)
+	wo.errs = make([]string, n)
+
+	var cmds []tea.Cmd
+	for i, f := range fields {
+		ti := textinput.New()
+		ti.Prompt = "› "
+		ti.Placeholder = f.Help
+		if f.Sensitive {
+			ti.EchoMode = textinput.EchoPassword
+		}
+		wo.inputs[i] = ti
+
+		if f.Suggest != nil {
+			wo.loading[i] = true
+			cmds = append(cmds, wo.fetchSuggest(i, f))
+		}
+	}
+	cmds = append(cmds, wo.inputs[0].Focus(), wo.spin.Tick)
+	return tea.Batch(cmds...)
 }
 
 func (wo *wizardOverlay) Clear() {
 	wo.active = false
 	wo.fields = nil
-	wo.committed = nil
+	wo.inputs = nil
 	wo.choices = nil
-	wo.err = nil
+	wo.errs = nil
 }
 
-func (wo *wizardOverlay) curField() *registry.Field {
-	if wo.idx >= len(wo.fields) {
-		return nil
-	}
-	return &wo.fields[wo.idx]
-}
-
-func (wo *wizardOverlay) isSelect() bool {
-	f := wo.curField()
-	return f != nil && f.Suggest != nil
-}
-
-func (wo *wizardOverlay) startField() tea.Cmd {
-	f := wo.curField()
-	if f == nil {
-		return nil
-	}
-	wo.ti.Reset()
-	wo.selIdx = 0
-	wo.choices = nil
-	wo.err = nil
-	if f.Suggest != nil {
-		wo.ti.Blur()
-		wo.loading = true
-		return wo.fetchSuggest(*f)
-	}
-	wo.loading = false
-	wo.ti.Placeholder = f.Help
-	if f.Sensitive {
-		wo.ti.EchoMode = textinput.EchoPassword
-	} else {
-		wo.ti.EchoMode = textinput.EchoNormal
-	}
-	return wo.ti.Focus()
+func (wo *wizardOverlay) isSelect(i int) bool {
+	return i < len(wo.fields) && wo.fields[i].Suggest != nil
 }
 
 type wizardSuggestMsg struct {
@@ -112,8 +92,7 @@ type wizardSuggestMsg struct {
 	err     error
 }
 
-func (wo *wizardOverlay) fetchSuggest(f registry.Field) tea.Cmd {
-	idx := wo.idx
+func (wo *wizardOverlay) fetchSuggest(idx int, f registry.Field) tea.Cmd {
 	ctx := wo.ctx
 	return func() tea.Msg {
 		cs, err := f.Suggest(ctx)
@@ -121,32 +100,61 @@ func (wo *wizardOverlay) fetchSuggest(f registry.Field) tea.Cmd {
 	}
 }
 
-func (wo *wizardOverlay) commitAndAdvance(val string) tea.Cmd {
-	f := wo.curField()
-	if f == nil {
-		return nil
-	}
-	if f.Validate != nil {
-		if err := f.Validate(val); err != nil {
-			wo.err = err
-			return nil
+func (wo *wizardOverlay) focusField(i int) tea.Cmd {
+	wo.idx = i
+	var cmds []tea.Cmd
+	for j := range wo.inputs {
+		if j == i && !wo.isSelect(j) {
+			cmds = append(cmds, wo.inputs[j].Focus())
+		} else {
+			wo.inputs[j].Blur()
 		}
 	}
-	wo.input[f.Flag] = val
-	wo.committed = append(wo.committed, committedField{flag: f.Flag, val: val})
-	wo.idx++
-	if wo.curField() == nil {
-		// All fields collected — signal completion.
-		wo.active = false
-		return func() tea.Msg {
-			return wizardDoneMsg{
-				resource: wo.resource,
-				saga:     wo.saga,
-				input:    wo.input,
+	return tea.Batch(cmds...)
+}
+
+func (wo *wizardOverlay) submit() tea.Cmd {
+	// Validate all fields.
+	valid := true
+	for i, f := range wo.fields {
+		val := wo.fieldValue(i)
+		wo.errs[i] = ""
+		if f.Required && val == "" {
+			wo.errs[i] = "required"
+			valid = false
+		} else if val != "" && f.Validate != nil {
+			if err := f.Validate(val); err != nil {
+				wo.errs[i] = err.Error()
+				valid = false
 			}
 		}
 	}
-	return wo.startField()
+	if !valid {
+		// Focus first field with error.
+		for i, e := range wo.errs {
+			if e != "" {
+				return wo.focusField(i)
+			}
+		}
+		return nil
+	}
+	for i, f := range wo.fields {
+		wo.input[f.Flag] = wo.fieldValue(i)
+	}
+	wo.active = false
+	return func() tea.Msg {
+		return wizardDoneMsg{resource: wo.resource, saga: wo.saga, input: wo.input}
+	}
+}
+
+func (wo *wizardOverlay) fieldValue(i int) string {
+	if wo.isSelect(i) {
+		if len(wo.choices[i]) > 0 && wo.selIdx[i] < len(wo.choices[i]) {
+			return wo.choices[i][wo.selIdx[i]].Value
+		}
+		return ""
+	}
+	return wo.inputs[i].Value()
 }
 
 // wizardDoneMsg is posted when the wizard overlay finishes collecting all fields.
@@ -165,14 +173,13 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return true, wo.handleKey(msg)
 	case wizardSuggestMsg:
-		if msg.idx != wo.idx {
-			return true, nil
-		}
-		wo.loading = false
-		if msg.err != nil {
-			wo.err = msg.err
-		} else {
-			wo.choices = msg.choices
+		if msg.idx < len(wo.fields) {
+			wo.loading[msg.idx] = false
+			if msg.err != nil {
+				wo.errs[msg.idx] = msg.err.Error()
+			} else {
+				wo.choices[msg.idx] = msg.choices
+			}
 		}
 		return true, nil
 	case spinner.TickMsg:
@@ -180,10 +187,10 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 		wo.spin, cmd = wo.spin.Update(msg)
 		return true, cmd
 	}
-	// Forward to text input if active.
-	if !wo.isSelect() && wo.active {
+	// Forward to focused text input.
+	if wo.idx < len(wo.inputs) && !wo.isSelect(wo.idx) {
 		var cmd tea.Cmd
-		wo.ti, cmd = wo.ti.Update(msg)
+		wo.inputs[wo.idx], cmd = wo.inputs[wo.idx].Update(msg)
 		return true, cmd
 	}
 	return true, nil
@@ -195,36 +202,39 @@ func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	case "ctrl+c", "esc":
 		wo.Clear()
 		return nil
+	case "tab", "down":
+		if wo.idx < len(wo.fields)-1 {
+			return wo.focusField(wo.idx + 1)
+		}
+		return nil
+	case "shift+tab", "up":
+		if wo.idx > 0 {
+			return wo.focusField(wo.idx - 1)
+		}
+		return nil
 	case "enter":
-		if wo.curField() == nil {
-			return nil
-		}
-		if wo.isSelect() {
-			if wo.loading || len(wo.choices) == 0 {
-				return nil
+		return wo.submit()
+	}
+	// Selection list navigation for Suggest fields.
+	if wo.isSelect(wo.idx) && !wo.loading[wo.idx] {
+		switch key {
+		case "j":
+			if wo.selIdx[wo.idx] < len(wo.choices[wo.idx])-1 {
+				wo.selIdx[wo.idx]++
 			}
-			return wo.commitAndAdvance(wo.choices[wo.selIdx].Value)
-		}
-		val := wo.ti.Value()
-		if val == "" && wo.curField().Required {
+			return nil
+		case "k":
+			if wo.selIdx[wo.idx] > 0 {
+				wo.selIdx[wo.idx]--
+			}
 			return nil
 		}
-		return wo.commitAndAdvance(val)
-	case "up", "k":
-		if wo.isSelect() && wo.selIdx > 0 {
-			wo.selIdx--
-		}
-		return nil
-	case "down", "j":
-		if wo.isSelect() && wo.selIdx < len(wo.choices)-1 {
-			wo.selIdx++
-		}
-		return nil
+		return nil // consume other keys on select fields
 	}
 	// Forward to text input.
-	if !wo.isSelect() {
+	if wo.idx < len(wo.inputs) {
 		var cmd tea.Cmd
-		wo.ti, cmd = wo.ti.Update(msg)
+		wo.inputs[wo.idx], cmd = wo.inputs[wo.idx].Update(msg)
 		return cmd
 	}
 	return nil
@@ -243,74 +253,67 @@ func (wo *wizardOverlay) Box(w, h int) string {
 	if wo.saga != nil {
 		sagaName = wo.saga.Name
 	}
-	header := theme.Heading.Render(sagaName)
-
-	// Progress indicator.
-	total := len(wo.fields)
-	done := wo.idx
-	progress := theme.MutedText.Render(fmt.Sprintf("  (%d/%d)", done, total))
 
 	var body strings.Builder
-	body.WriteString(header + progress + "\n\n")
+	body.WriteString(theme.Heading.Render(sagaName) + "\n\n")
 
-	// Show committed fields.
-	for _, c := range wo.committed {
-		body.WriteString(fmt.Sprintf("  %s %s: %s\n",
-			theme.OKMark,
-			theme.Label.Render(c.flag),
-			c.val,
-		))
-	}
-
-	// Current field.
-	f := wo.curField()
-	if f != nil {
-		label := theme.Value.Render(f.Flag)
+	for i, f := range wo.fields {
+		focused := i == wo.idx
+		label := f.Flag
+		if focused {
+			label = theme.Value.Render(label)
+		} else {
+			label = theme.Label.Render(label)
+		}
 		if f.Required {
 			label += theme.Err.Render(" *")
 		}
-		if f.Help != "" {
-			label += theme.MutedText.Render("  " + f.Help)
-		}
-		body.WriteString("\n  " + label + "\n")
+		body.WriteString("  " + label + "\n")
 
 		switch {
-		case wo.isSelect() && wo.loading:
+		case wo.isSelect(i) && wo.loading[i]:
 			body.WriteString("  " + wo.spin.View() + " " + theme.MutedText.Render("loading…") + "\n")
-		case wo.isSelect():
-			body.WriteString(wo.renderChoices())
+		case wo.isSelect(i):
+			body.WriteString(wo.renderChoices(i, focused))
 		default:
-			body.WriteString("  " + wo.ti.View() + "\n")
+			body.WriteString("  " + wo.inputs[i].View() + "\n")
 		}
 
-		if wo.err != nil {
-			body.WriteString("  " + theme.Err.Render(wo.err.Error()) + "\n")
+		if wo.errs[i] != "" {
+			body.WriteString("  " + theme.Err.Render(wo.errs[i]) + "\n")
+		}
+		if i < len(wo.fields)-1 {
+			body.WriteString("\n")
 		}
 	}
 
-	body.WriteString("\n" + theme.MutedText.Render("  enter to confirm · esc to cancel"))
+	body.WriteString("\n" + theme.MutedText.Render("  tab/shift+tab navigate · enter submit · esc cancel"))
 
-	content := body.String()
-	return theme.Border.Width(width).Render(content)
+	return theme.Border.Width(width).Render(body.String())
 }
 
-func (wo *wizardOverlay) renderChoices() string {
-	if len(wo.choices) == 0 {
-		return "  " + theme.MutedText.Render("(no options available)") + "\n"
+func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool) string {
+	cs := wo.choices[fieldIdx]
+	if len(cs) == 0 {
+		return "  " + theme.MutedText.Render("(no options)") + "\n"
 	}
+	sel := wo.selIdx[fieldIdx]
 	var s strings.Builder
-	for i, c := range wo.choices {
+	for i, c := range cs {
 		marker := "    "
 		line := c.Value
 		if c.Help != "" {
 			line += theme.MutedText.Render("  " + c.Help)
 		}
-		if i == wo.selIdx {
-			marker = "  " + theme.Key.Render("▸ ")
-			line = theme.Value.Render(line)
+		if i == sel {
+			if focused {
+				marker = "  " + theme.Key.Render("▸ ")
+				line = theme.Value.Render(line)
+			} else {
+				marker = "  › "
+			}
 		}
 		s.WriteString(marker + line + "\n")
 	}
-	s.WriteString("  " + theme.MutedText.Render("↑/↓ select · enter confirm") + "\n")
 	return s.String()
 }

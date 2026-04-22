@@ -33,9 +33,10 @@ func main() {
 	}
 	root.RunE = runTUI
 	root.AddCommand(&cobra.Command{
-		Use:   "tui",
-		Short: "launch the full-screen TUI",
-		RunE:  runTUI,
+		Use:     "tui",
+		Short:   "launch the full-screen TUI",
+		GroupID: "interface",
+		RunE:    runTUI,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

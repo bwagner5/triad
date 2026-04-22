@@ -14,18 +14,14 @@ import (
 type paletteKind int
 
 const (
-	paletteNav paletteKind = iota // jump to a resource's list
-	paletteSaga
-	paletteAction
+	paletteNav paletteKind = iota
 )
 
 type paletteEntry struct {
 	kind     paletteKind
-	display  string // what the fuzzy matcher sees, e.g. "container create"
+	display  string
 	short    string
 	resource *registry.Resource
-	saga     *registry.Saga
-	action   *registry.Action
 }
 
 type paletteResultMsg struct {
@@ -46,18 +42,10 @@ func newPalette(reg *registry.Registry) paletteModel {
 	for _, res := range reg.All() {
 		r := res
 		entries = append(entries, paletteEntry{kind: paletteNav, display: r.Plural, short: r.Short, resource: &r})
-		for _, s := range r.Sagas {
-			s := s
-			entries = append(entries, paletteEntry{kind: paletteSaga, display: r.Name + " " + s.Name, short: s.Short, resource: &r, saga: &s})
-		}
-		for _, a := range r.Actions {
-			a := a
-			entries = append(entries, paletteEntry{kind: paletteAction, display: r.Name + " " + a.Verb, short: a.Short, resource: &r, action: &a})
-		}
 	}
 	ti := textinput.New()
 	ti.Prompt = ": "
-	ti.Placeholder = "resource, action, or saga…"
+	ti.Placeholder = "switch resource…"
 	m := paletteModel{ti: ti, entries: entries}
 	m.filter("")
 	return m
@@ -132,14 +120,6 @@ func (m paletteModel) Box(w, _ int) string {
 			prefix = theme.Key.Render("▸ ")
 		}
 		tag := ""
-		switch e.kind {
-		case paletteNav:
-			tag = theme.MutedText.Render("[nav]   ")
-		case paletteSaga:
-			tag = theme.MutedText.Render("[saga]  ")
-		case paletteAction:
-			tag = theme.MutedText.Render("[action]")
-		}
 		rows += fmt.Sprintf("%s%s %s  %s\n", prefix, tag, e.display, theme.MutedText.Render(e.short))
 	}
 	return theme.Border.Width(width).Render(m.ti.View() + "\n" + rows)
