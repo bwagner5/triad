@@ -1,7 +1,14 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_DIR ?= ./build
 
-.PHONY: build test lint ci attribution snapshot clean docker help
+GOLANGCI_LINT_VERSION ?= latest
+GORELEASER_VERSION ?= latest
+
+.PHONY: tools build test lint ci attribution snapshot clean docker help
+
+tools: ## Install required dev tools
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	go install github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
 
 ci: lint build test ## Run lint, build, and test (used by CI and local dev)
 
