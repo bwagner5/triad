@@ -227,6 +227,15 @@ Operations with a `Key` field (e.g. `"c"`, `"ctrl+d"`, `"l"`) are automatically 
 
 See [`cmd/triad/`](cmd/triad/) for a working example with a `container` resource that demonstrates fields, operations, a custom action, and a Store.
 
+Try the demo CLI:
+
+```bash
+curl -sL "https://github.com/bwagner5/triad/releases/latest/download/triad_$(uname -s)_$(uname -m).tar.gz" | tar xz
+./triad --help
+./triad              # launches TUI
+./triad container    # list containers
+```
+
 ## License
 
 Apache 2.0 — see [LICENSE](LICENSE).
