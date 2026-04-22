@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/bwagner5/go-cli-template/pkg/registry"
+	"github.com/bwagner5/triad/pkg/registry"
 )
 
 // TestTabsOnLastRow asserts the k9s-style breadcrumb pills live on the bottom row.

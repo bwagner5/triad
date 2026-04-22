@@ -6,9 +6,9 @@ import (
 	"reflect"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/bwagner5/go-cli-template/pkg/registry"
-	"github.com/bwagner5/go-cli-template/pkg/runtime"
-	"github.com/bwagner5/go-cli-template/pkg/ui/wizard"
+	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/runtime"
+	"github.com/bwagner5/triad/pkg/ui/wizard"
 )
 
 // startSagaMsg is posted when an operation with Steps is ready to run.

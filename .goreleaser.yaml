@@ -5,7 +5,7 @@ before:
     - go mod tidy
 
 builds:
-  - main: ./cmd/go-cli-template
+  - main: ./cmd/triad
     ldflags:
       - -s -w -X main.version={{.Version}}
     env:

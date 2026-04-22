@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/ui/theme"
 )
 
 // helpOverlay is the "?" modal listing every binding for the current screen,

@@ -15,10 +15,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/bwagner5/go-cli-template/pkg/registry"
-	"github.com/bwagner5/go-cli-template/pkg/runtime"
-	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
-	"github.com/bwagner5/go-cli-template/pkg/ui/wizard"
+	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/runtime"
+	"github.com/bwagner5/triad/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/ui/wizard"
 	"github.com/spf13/cobra"
 )
 

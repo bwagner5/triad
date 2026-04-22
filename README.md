@@ -1,128 +1,85 @@
-# go-cli-template
+# triad
 
-A batteries-included Go CLI scaffold with three interface modes that share a single resource model:
+A Go library for building CLIs with three interface modes from a single resource model:
 
-1. **CLI** — non-interactive, scriptable, with styled `--help`, typo suggestions, and multiple output formats (`short`, `wide`, `yaml`, `json`).
-2. **Interactive CLI** — same CLI, but prompts for missing flags with an inline wizard (selection lists for known resources, free-form text for everything else). Default mode; disable with `-y` for CI.
-3. **TUI** — full-screen k9s-style terminal UI with table views, detail views, CRUD overlays, a command palette, contextual help, toast notifications, and live saga progress.
+1. **CLI** — scriptable, with styled `--help`, typo suggestions, and output formats (`short`, `wide`, `yaml`, `json`)
+2. **Interactive CLI** — prompts for missing flags with an inline wizard; default mode, disable with `-y`
+3. **TUI** — full-window textual UI with table/detail views, CRUD overlays, command palette, and contextual help
 
-All three modes are driven by the same `registry.Resource` declarations. You define your resources once; the CLI, wizard, and TUI are generated automatically.
+Define your resources once. Triad generates the CLI commands, wizard prompts, and TUI screens automatically.
 
-## Quick Start
+## Install
 
 ```bash
-# Clone the template
-git clone https://github.com/bwagner5/go-cli-template.git my-cli
-cd my-cli
-
-# Rename everything from go-cli-template to your CLI name
-export CLI_NAME="my-cli"
-export GITHUB_OWNER="my-org"
-
-# Replace the module path and all references
-find . -path ./.git -prune -o -type f -print0 | xargs -0 sed -i'' -e "s|bwagner5/go-cli-template|${GITHUB_OWNER}/${CLI_NAME}|g"
-find . -path ./.git -prune -o -type f -print0 | xargs -0 sed -i'' -e "s|go-cli-template|${CLI_NAME}|g"
-
-# Rename the cmd directory
-mv cmd/go-cli-template "cmd/${CLI_NAME}"
-
-# Clean up sed backup files (macOS creates these with -i'')
-find . -name "*-e" -type f -delete
-
-# Update the go module
-go mod edit -module "github.com/${GITHUB_OWNER}/${CLI_NAME}"
-go mod tidy
-
-# Verify
-go build ./...
-go run "./cmd/${CLI_NAME}" --help
+go get github.com/bwagner5/triad@latest
 ```
 
-## Usage
-
-```
-# Launch the TUI (default when no command is given)
-my-cli
-
-# Explicitly launch the TUI
-my-cli tui
-
-# List resources
-my-cli container
-my-cli container list
-
-# Get a single resource
-my-cli container get c1
-
-# Create (interactive — prompts for missing fields)
-my-cli container create
-
-# Create (non-interactive — all flags required)
-my-cli container create -y --name web --image nginx:1.25
-
-# Delete (with confirmation prompt)
-my-cli container delete --name web
-
-# Resource-specific action
-my-cli container logs --name web
-
-# Output formats
-my-cli container -o wide
-my-cli container -o yaml
-my-cli container -o json
-```
-
-## TUI Key Bindings
-
-| Key | Action |
-|---|---|
-| `j` / `k` | Navigate up/down |
-| `enter` | View detail |
-| `esc` | Back to list |
-| `c` | Create (opens wizard overlay) |
-| `ctrl+d` | Delete (with confirmation overlay) |
-| `l` | Logs (container-specific) |
-| `r` | Refresh |
-| `:` | Command palette (switch resources) |
-| `?` | Help overlay |
-| `0-9` | Switch to resource by index |
-| `q` | Quit |
-
-## Project Structure
-
-```
-cmd/<cli-name>/main.go      # Wires resources into the CLI + TUI
-pkg/
-  registry/                  # Resource model: Field, Operation, Store
-  resources/
-    container/               # Example resource (replace with yours)
-  runtime/                   # Saga executor, event bus, refresh scheduler
-  ui/
-    cli/                     # Cobra command tree, styled help, output renderers
-    wizard/                  # Inline bubbletea wizard for interactive CLI
-    tui/                     # Full-screen TUI (k9s-style)
-    theme/                   # Shared lipgloss styles
-    ascii/                   # Auto-generated ASCII banner
-  duration/                  # Human-friendly duration formatting
-```
-
-## Working with the Resource Model
-
-The resource model is the core abstraction. You define resources in `pkg/resources/<name>/` and register them in `main.go`. Everything else — CLI commands, wizard prompts, TUI screens — is generated from the resource definition.
-
-### Defining a Resource
-
-A resource is a `registry.Resource` struct. Here's the anatomy:
+## Minimal Example
 
 ```go
-package myresource
+package main
 
 import (
     "context"
-    "github.com/my-org/my-cli/pkg/registry"
+    "os"
+    "os/signal"
+
+    "github.com/bwagner5/triad/pkg/registry"
+    "github.com/bwagner5/triad/pkg/ui/cli"
+    "github.com/bwagner5/triad/pkg/ui/tui"
+    "github.com/spf13/cobra"
 )
 
-// 1. Define your Go type
+func main() {
+    registry.Register(widget.Resource()) // your resource
+
+    g := &cli.Globals{}
+    root := cli.Build("my-app", "manage widgets", registry.Default(), g)
+
+    // TUI as default command
+    runTUI := func(cmd *cobra.Command, _ []string) error {
+        return tui.Run(cmd.Context(), registry.Default(), tui.Options{Name: "my-app"})
+    }
+    root.RunE = runTUI
+    root.AddCommand(&cobra.Command{
+        Use: "tui", Short: "launch TUI", GroupID: "interface", RunE: runTUI,
+    })
+
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+    defer stop()
+    if err := root.ExecuteContext(ctx); err != nil {
+        os.Exit(1)
+    }
+}
+```
+
+This gives you:
+
+```
+my-app                        # launches TUI
+my-app widget                 # list widgets (table)
+my-app widget get <id>        # single widget
+my-app widget create          # interactive wizard
+my-app widget create -y ...   # non-interactive
+my-app widget delete          # with confirmation
+my-app widget logs            # custom action
+my-app --help                 # styled help with categories
+```
+
+## Resource Model
+
+The resource model is the core API. You define a `registry.Resource` and call `Register()`. Triad handles the rest.
+
+### Defining a Resource
+
+```go
+package widget
+
+import (
+    "context"
+    "github.com/bwagner5/triad/pkg/registry"
+)
+
 type Widget struct {
     ID     string
     Name   string
@@ -130,162 +87,104 @@ type Widget struct {
     Status string
 }
 
-// 2. Implement the Store interface
 type store struct { /* your backend */ }
 
-func (s *store) Get(ctx context.Context, id string) (any, error) { /* ... */ }
-func (s *store) List(ctx context.Context, f registry.Filter) ([]any, error) { /* ... */ }
+func (s *store) Get(ctx context.Context, id string) (any, error)                  { /* ... */ }
+func (s *store) List(ctx context.Context, f registry.Filter) ([]any, error)       { /* ... */ }
 
-// 3. Return the Resource declaration
 func Resource() registry.Resource {
     return registry.Resource{
         Name:    "widget",
         Plural:  "widgets",
         Aliases: []string{"w"},
         Short:   "manage widgets",
-        Fields:  []registry.Field{ /* ... */ },
+        Fields:  fields,
         Store:   &store{},
-        Operations: map[string]registry.Operation{ /* ... */ },
+        Operations: ops,
     }
 }
 ```
 
-Then register it in `main.go`:
-
-```go
-registry.Register(myresource.Resource())
-```
-
-That's it. The CLI gets `my-cli widget`, `my-cli widget create`, etc. The TUI gets a new screen. The wizard knows how to prompt for fields.
-
 ### Fields
 
-Fields serve triple duty: CLI flags, wizard prompts, and table columns.
+Fields drive CLI flags, wizard prompts, and table columns.
 
 ```go
-Fields: []registry.Field{
-    {
-        Name:  "ID",                              // Struct field name (for reflection)
-        Flag:  "id",                               // CLI flag: --id
-        Help:  "widget id",                        // Help text shown in --help and wizard
-        Table: registry.TableHint{Header: "ID"},   // Column header in table output
-    },
-    {
-        Name:     "Name",
-        Flag:     "name",
-        Short:    "n",                             // Short flag: -n
-        Help:     "widget name",
-        Required: true,                            // Wizard will prompt; CLI will error if missing
-        Validate: func(v string) error {           // Client-side validation
+var fields = []registry.Field{
+    {Name: "ID",   Flag: "id",   Help: "widget id",   Table: registry.TableHint{Header: "ID"}},
+    {Name: "Name", Flag: "name", Short: "n", Help: "widget name", Required: true,
+        Validate: func(v string) error {
             if v == "" { return fmt.Errorf("required") }
             return nil
         },
         Table: registry.TableHint{Header: "NAME"},
     },
-    {
-        Name:  "Status",
-        Flag:  "status",
-        Help:  "status",
-        Table: registry.TableHint{Header: "STATUS", Wide: true},  // Only shown with -o wide
+    {Name: "Status", Flag: "status", Help: "status",
+        Table: registry.TableHint{Header: "STATUS", Wide: true}, // only in -o wide
     },
 }
 ```
 
-Key field options:
-
 | Option | Purpose |
 |---|---|
-| `Required` | CLI errors if missing (unless interactive). Wizard always prompts. |
-| `Validate` | Called on the raw string value. Return an error to reject. |
-| `Suggest` | Returns `[]Choice` for selection lists. Use for fields referencing existing resources (e.g. picking a container to delete). Do NOT use for free-form input like image names. |
-| `Sensitive` | Masks input in the wizard (password mode). |
-| `Default` | Pre-populates the flag value. |
-| `Table.Wide` | Column only appears in `-o wide` output. |
+| `Required` | CLI errors if missing. Wizard always prompts. |
+| `Validate` | Validates the raw string value. |
+| `Suggest` | Returns `[]Choice` for selection lists (use for fields referencing existing resources). |
+| `Sensitive` | Masks input in the wizard. |
+| `Default` | Pre-populates the flag. |
+| `Table.Wide` | Only shown with `-o wide`. |
 
-### Operations (Workflows & Actions)
+### Operations
 
-Operations are the verbs on a resource — create, delete, logs, restart, etc. An operation with `Steps` is a multi-step workflow (progress overlay, rollback on failure). An operation with only `Run` is a simple action (takes over the terminal for streaming output).
+Operations are verbs on a resource. An operation with `Steps` is a multi-step workflow with progress UI and rollback. An operation with only `Run` is a simple action.
 
 ```go
-Operations: map[string]registry.Operation{
+var ops = map[string]registry.Operation{
     "create": {
-        Name:  "create",
-        Short: "create a widget",
-        Key:   "c",                    // TUI key binding (press 'c' to create)
-        Fields: []registry.Field{      // Inputs needed
+        Name: "create", Short: "create a widget", Key: "c",
+        Fields: []registry.Field{
             {Flag: "name", Required: true, Help: "widget name"},
-            {Flag: "color", Help: "widget color (e.g. red, blue)"},
         },
-        Steps: []registry.Step{        // Multi-step workflow
-            {
-                Label: "Validate input",
-                Do: func(ctx context.Context, s *registry.State) error {
-                    if s.Input.Get("name") == "" {
-                        return fmt.Errorf("name required")
-                    }
-                    return nil
-                },
-            },
-            {
-                Label: "Create widget",
-                Do: func(ctx context.Context, s *registry.State) error {
-                    id := createWidget(s.Input.Get("name"), s.Input.Get("color"))
-                    s.Data["id"] = id
-                    return nil
-                },
-                Undo: func(ctx context.Context, s *registry.State) error {
-                    // Optional: rollback on failure of a later step
-                    deleteWidget(s.Data["id"].(string))
-                    return nil
-                },
-            },
+        Steps: []registry.Step{
+            {Label: "Validate", Do: func(ctx context.Context, s *registry.State) error {
+                return nil
+            }},
+            {Label: "Create", Do: func(ctx context.Context, s *registry.State) error {
+                // s.Input.Get("name"), s.Data for passing state between steps
+                return nil
+            }},
         },
     },
     "delete": {
-        Name:    "delete",
-        Short:   "delete a widget",
-        Key:     "ctrl+d",
-        Confirm: "Delete this widget? This cannot be undone.",  // Confirmation prompt
+        Name: "delete", Short: "delete a widget", Key: "ctrl+d",
+        Confirm: "Delete this widget?",
         Fields: []registry.Field{
-            {Flag: "name", Required: true, Suggest: suggestWidgetNames},
+            {Flag: "name", Required: true, Suggest: suggestWidgets},
         },
         Steps: []registry.Step{
-            {Label: "Remove widget", Do: func(ctx context.Context, s *registry.State) error {
-                return deleteWidget(s.Input.Get("name"))
+            {Label: "Delete", Do: func(ctx context.Context, s *registry.State) error {
+                return nil
             }},
         },
     },
     "logs": {
-        Name:  "logs",
-        Short: "stream widget logs",
-        Key:   "l",
+        Name: "logs", Short: "stream logs", Key: "l",
         Fields: []registry.Field{
-            {Flag: "name", Required: true, Suggest: suggestWidgetNames},
-            {Flag: "follow", Short: "f", Help: "follow log output", Default: "false"},
+            {Flag: "name", Required: true, Suggest: suggestWidgets},
         },
         Run: func(ctx context.Context, in registry.Input) error {
-            // Simple action: write directly to stdout. In the TUI, this
-            // runs via tea.Exec which temporarily releases the terminal.
-            return streamLogs(ctx, in.Get("name"), in.Get("follow") == "true")
+            // writes to stdout; TUI releases terminal via tea.Exec
+            return nil
         },
     },
-},
+}
 ```
 
-How operations render across UIs:
+**Multi-step operations** render as: append-only log (CI), live rewriting spinners (interactive CLI), or a progress overlay (TUI).
 
-**Multi-step (Steps):**
-- **CLI (non-interactive / `-y`)**: each step prints `◐ Running` then `✓ Complete` on separate lines.
-- **CLI (interactive, default)**: bubbletea live view rewrites lines in-place with spinners.
-- **TUI**: saga overlay with step-by-step progress, auto-dismiss on completion.
+**Simple actions** run directly to stdout in CLI mode, and temporarily release the terminal in TUI mode.
 
-**Simple action (Run):**
-- **CLI**: runs directly, output goes to stdout.
-- **TUI**: temporarily releases the terminal via `tea.Exec`, runs the action, then resumes.
-
-### Store (Read Operations)
-
-The `Store` interface is minimal:
+### Store
 
 ```go
 type Store interface {
@@ -294,106 +193,40 @@ type Store interface {
 }
 ```
 
-Tips:
-- `List` should return items in a **stable sort order** (the TUI polls periodically; unstable order causes visual flickering).
-- `Get` should accept both ID and name for convenience.
-- The `Filter` struct has `NameLike` and `Limit` — implement what makes sense for your backend.
+`List` should return items in a **stable sort order** — the TUI polls periodically and unstable order causes flickering.
 
-### Putting It All Together
+## Core TUI Key Bindings
 
-Here's the minimal flow to add a new resource:
+| Key | Action |
+|---|---|
+| `j`/`k` | Navigate |
+| `enter` | Detail view |
+| `esc` | Back |
+| `/` | Filter |
+| `:` | Command palette |
+| `?` | Help overlay |
+| `r` | Refresh |
+| `0-9` | Switch resource |
+| `q` | Quit |
 
-1. Create `pkg/resources/widget/widget.go`
-2. Define the `Widget` struct, a `Store`, and a `Resource()` function
-3. In `main.go`, add `registry.Register(widget.Resource())`
-4. Run `go build ./...`
+Operations with a `Key` field (e.g. `"c"`, `"ctrl+d"`, `"l"`) are automatically bound and shown in the help overlay.
 
-You now have:
-- `my-cli widget` / `my-cli widget list` — table output
-- `my-cli widget get <id>` — single item
-- `my-cli widget create` — interactive wizard or `--flag` based
-- `my-cli widget delete` — with confirmation
-- `my-cli widget logs` — or whatever actions you defined
-- TUI screen with all of the above accessible via key bindings
-- `--help` on every command with styled output
+## API Reference
 
-### Customizing the TUI Banner
+| Package | Purpose |
+|---|---|
+| `pkg/registry` | `Resource`, `Field`, `Operation`, `Store`, `Input`, `State` |
+| `pkg/ui/cli` | `cli.Build()` — cobra command tree with styled help |
+| `pkg/ui/tui` | `tui.Run()` — full-screen TUI |
+| `pkg/ui/wizard` | `wizard.Collect()` — inline field prompts |
+| `pkg/runtime` | Saga executor, event bus, refresh scheduler |
+| `pkg/ui/theme` | Shared lipgloss styles |
+| `pkg/ui/ascii` | `ascii.Render()` — ASCII art banner from string |
 
-The TUI auto-generates an ASCII art banner from the CLI name using [go-figure](https://github.com/common-nighthawk/go-figure). To override it:
+## Example
 
-```go
-tui.Run(ctx, reg, tui.Options{
-    Name: "my-cli",
-    Logo: lipgloss.NewStyle().Foreground(lipgloss.Color("#F2C14E")).Render(myCustomArt),
-})
-```
-
-## Building & Releasing
-
-```bash
-make build          # Build to ./build/
-make test           # Run tests
-make lint           # Run golangci-lint (v2 config)
-make attribution    # Generate ATTRIBUTION.md from dependency licenses
-make release        # Local snapshot release via goreleaser (no publish)
-make clean          # Remove build artifacts
-```
-
-### Dev Loop
-
-```bash
-# Build and run
-make build && ./build/go-cli-template --help
-
-# Run directly during development
-go run ./cmd/go-cli-template container
-
-# Run tests
-make test
-
-# Lint (install golangci-lint first: https://golangci-lint.run/docs/welcome/install/)
-make lint
-```
-
-### Releasing
-
-Releases are driven by [goreleaser](https://goreleaser.com/) via GitHub Actions. Tag a version to trigger a release:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-This builds binaries for linux/darwin × amd64/arm64, creates archives, and publishes them as GitHub release assets with a changelog.
-
-To test the release locally without publishing:
-
-```bash
-make release
-ls dist/
-```
-
-### Attribution
-
-The CLI ships with an `--attribution` flag that prints open-source dependency licenses. To regenerate after changing dependencies:
-
-```bash
-make attribution    # generates ATTRIBUTION.md and copies it into the embed directory
-go run ./cmd/go-cli-template --attribution
-```
-
-## Installation
-
-Download from [GitHub Releases](https://github.com/<owner>/<cli-name>/releases):
-
-```bash
-[[ $(uname -m) == "aarch64" ]] && ARCH="arm64" || ARCH="amd64"
-OS=$(uname | tr '[:upper:]' '[:lower:]')
-VERSION="0.1.0"
-curl -sL "https://github.com/<owner>/<cli-name>/releases/download/v${VERSION}/<cli-name>_${VERSION}_${OS}_${ARCH}.tar.gz" | tar xz
-chmod +x <cli-name>
-```
+See [`cmd/triad/`](cmd/triad/) for a working example with a `container` resource that demonstrates fields, operations, a custom action, and a Store.
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

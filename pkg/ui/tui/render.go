@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/bwagner5/go-cli-template/pkg/registry"
-	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/ui/theme"
 )
 
 // detailID returns a short identifier for an item — the first table-visible

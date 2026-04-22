@@ -8,9 +8,9 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
-	"github.com/bwagner5/go-cli-template/pkg/registry"
-	"github.com/bwagner5/go-cli-template/pkg/runtime"
-	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/runtime"
+	"github.com/bwagner5/triad/pkg/ui/theme"
 	"gopkg.in/yaml.v3"
 )
 

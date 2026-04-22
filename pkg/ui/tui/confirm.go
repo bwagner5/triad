@@ -4,8 +4,8 @@ import (
 	"fmt"
 
 	"charm.land/lipgloss/v2"
-	"github.com/bwagner5/go-cli-template/pkg/registry"
-	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/ui/theme"
 )
 
 // confirmOverlay is a yes/no modal shown before destructive sagas.

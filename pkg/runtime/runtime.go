@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bwagner5/go-cli-template/pkg/registry"
+	"github.com/bwagner5/triad/pkg/registry"
 )
 
 // Status of a single saga step.

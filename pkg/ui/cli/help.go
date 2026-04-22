@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/ui/theme"
 	"github.com/spf13/cobra"
 )
 

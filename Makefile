@@ -1,11 +1,13 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 BUILD_DIR ?= ./build
 
-.PHONY: build test lint attribution snapshot clean help
+.PHONY: build test lint ci attribution snapshot clean docker help
+
+ci: lint build test ## Run lint, build, and test (used by CI and local dev)
 
 build: ## Build the binary
 	@mkdir -p $(BUILD_DIR)
-	go build -ldflags="-s -w -X main.version=$(VERSION)" -o $(BUILD_DIR)/go-cli-template ./cmd/go-cli-template
+	go build -ldflags="-s -w -X main.version=$(VERSION)" -o $(BUILD_DIR)/triad ./cmd/triad
 
 test: ## Run tests
 	go test ./... -v -count=1
@@ -22,6 +24,9 @@ snapshot: ## Create a snapshot release (no publish)
 
 clean: ## Remove build artifacts
 	rm -rf $(BUILD_DIR) dist/
+
+docker: ## Build Docker image
+	docker build --build-arg GO_VERSION=$$(grep '^go ' go.mod | awk '{print $$2}') -t triad .
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'

@@ -4,7 +4,7 @@ import (
 	"sort"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/bwagner5/go-cli-template/pkg/registry"
+	"github.com/bwagner5/triad/pkg/registry"
 )
 
 // needsSelection returns true when an operation acts on an existing resource

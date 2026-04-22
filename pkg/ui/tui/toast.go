@@ -4,7 +4,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/ui/theme"
 )
 
 // toastLevel indicates color (green/red) for flash messages.

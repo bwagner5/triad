@@ -5,8 +5,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/bwagner5/go-cli-template/pkg/runtime"
-	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/runtime"
+	"github.com/bwagner5/triad/pkg/ui/theme"
 )
 
 // sagaOverlay shows live step progress for a running saga.

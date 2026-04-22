@@ -6,17 +6,17 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/bwagner5/go-cli-template/pkg/attribution"
-	"github.com/bwagner5/go-cli-template/pkg/registry"
-	"github.com/bwagner5/go-cli-template/pkg/resources/container"
-	"github.com/bwagner5/go-cli-template/pkg/ui/cli"
-	"github.com/bwagner5/go-cli-template/pkg/ui/tui"
+	"github.com/bwagner5/triad/pkg/attribution"
+	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/resources/container"
+	"github.com/bwagner5/triad/pkg/ui/cli"
+	"github.com/bwagner5/triad/pkg/ui/tui"
 	"github.com/spf13/cobra"
 )
 
 var version = "dev"
 
-const cliName = "go-cli-template"
+const cliName = "triad"
 
 func main() {
 	// 1) Declare resources. This is the main extension point.

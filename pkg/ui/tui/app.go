@@ -22,11 +22,11 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
-	"github.com/bwagner5/go-cli-template/pkg/duration"
-	"github.com/bwagner5/go-cli-template/pkg/registry"
-	"github.com/bwagner5/go-cli-template/pkg/runtime"
-	"github.com/bwagner5/go-cli-template/pkg/ui/ascii"
-	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/duration"
+	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/runtime"
+	"github.com/bwagner5/triad/pkg/ui/ascii"
+	"github.com/bwagner5/triad/pkg/ui/theme"
 )
 
 func reflectIndirect(v any) reflect.Value { return reflect.Indirect(reflect.ValueOf(v)) }

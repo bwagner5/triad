@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/bwagner5/go-cli-template/pkg/registry"
+	"github.com/bwagner5/triad/pkg/registry"
 )
 
 // Container is the resource type.

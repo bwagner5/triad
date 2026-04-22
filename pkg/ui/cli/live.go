@@ -3,8 +3,8 @@ package cli
 import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
-	"github.com/bwagner5/go-cli-template/pkg/runtime"
-	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/runtime"
+	"github.com/bwagner5/triad/pkg/ui/theme"
 )
 
 // RenderEventsLive renders saga events inline with a single spinner that

@@ -13,8 +13,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
-	"github.com/bwagner5/go-cli-template/pkg/registry"
-	"github.com/bwagner5/go-cli-template/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/ui/theme"
 )
 
 // Collect prompts for each Field and writes answers into in.
