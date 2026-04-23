@@ -1,5 +1,7 @@
 # triad
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/bwagner5/triad.svg)](https://pkg.go.dev/github.com/bwagner5/triad)
+
 A Go library for building CLIs with three interface modes from a single resource model:
 
 1. **CLI** — scriptable, with styled `--help`, typo suggestions, and output formats (`short`, `wide`, `yaml`, `json`)

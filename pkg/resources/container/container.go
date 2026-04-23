@@ -1,10 +1,13 @@
-// Package container is an example resource demonstrating:
-//   - Fields with validation + dynamic suggestions
-//   - a Store for Get/List
-//   - Sagas for create + delete
-//   - a custom Action for `container logs`
+// Package container is an example resource that ships with the triad demo CLI.
 //
-// Replace this with your own resources when bootstrapping a new CLI.
+// It demonstrates the full resource model:
+//   - Fields with validation, table hints, and [registry.SuggestFrom] for selection lists
+//   - A [registry.Store] backed by an in-memory map (swap for your real backend)
+//   - A multi-step Operation ("create") with Steps and rollback
+//   - A destructive Operation ("delete") with Confirm and pre-populated input
+//   - A simple action Operation ("logs") with Run for streaming output
+//
+// Use this as a reference when building your own resources.
 package container
 
 import (
@@ -19,7 +22,8 @@ import (
 	"github.com/bwagner5/triad/pkg/registry"
 )
 
-// Container is the resource type.
+// Container is the domain type. Struct field names are matched (case-insensitive)
+// against Field.Name for table rendering and detail views.
 type Container struct {
 	ID     string
 	Name   string
@@ -88,7 +92,8 @@ func (s *store) delete(id string) {
 
 // ---- Resource definition ----
 
-// Resource returns the registry.Resource for containers.
+// Resource returns the registry.Resource for containers. Call
+// registry.Register(container.Resource()) in main to wire it into all UIs.
 func Resource() registry.Resource {
 	fields := []registry.Field{
 		{Name: "ID", Flag: "id", Help: "container id", Table: registry.TableHint{Header: "ID"}},

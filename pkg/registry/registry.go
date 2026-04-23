@@ -1,14 +1,14 @@
-// Package registry defines the resource model shared by every UI.
+// Package registry defines the resource model shared by all three UIs
+// (CLI, interactive wizard, and full-screen TUI).
 //
 // A Resource describes:
-//   - a Go type T (the resource's shape)
+//   - a Go type (the resource's shape)
 //   - Fields that drive CLI flags, wizard prompts, and table columns
 //   - a Store for read operations (Get/List)
-//   - Sagas for multi-step workflows (create, delete, custom)
-//   - Actions for resource-specific verbs like "logs" or "exec"
+//   - Operations for workflows (create, delete) and actions (logs, exec)
 //
-// Registering a Resource is all it takes to make it available in the
-// non-interactive CLI, the interactive wizard, and the full-screen TUI.
+// Registering a Resource is all it takes to make it available in every UI.
+// See [SuggestFrom] for building interactive selection lists from a Store.
 package registry
 
 import (
@@ -50,12 +50,15 @@ type Field struct {
 	Suggest func(ctx context.Context) ([]Choice, error)
 }
 
-// Input is the parsed user input for a saga or action.
+// Input is the parsed user input for an operation.
 // It's a simple string-keyed map so every UI can produce/consume it.
 type Input map[string]string
 
+// Get returns the value for key k, or "" if not set.
 func (i Input) Get(k string) string { return i[k] }
-func (i Input) Has(k string) bool   { _, ok := i[k]; return ok }
+
+// Has reports whether key k has been set (even if empty).
+func (i Input) Has(k string) bool { _, ok := i[k]; return ok }
 
 // Filter is passed to Store.List. Free-form; stores interpret fields they care about.
 type Filter struct {
@@ -129,8 +132,11 @@ type Operation struct {
 	Run func(ctx context.Context, in Input) error
 }
 
-// Resource is the central declaration. Keep Fields, Sagas and Actions
-// focused on business logic; UI concerns live elsewhere.
+// Resource is the central declaration that drives all three UIs.
+// Define Fields for columns/flags, a Store for reads, and Operations
+// for verbs (create, delete, logs, etc.). Register it with [Register]
+// and the CLI commands, wizard prompts, and TUI screens are generated
+// automatically.
 type Resource struct {
 	Name    string
 	Plural  string
