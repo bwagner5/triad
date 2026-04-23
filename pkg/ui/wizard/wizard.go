@@ -214,7 +214,11 @@ func (m *model) View() tea.View {
 	if f.Help != "" {
 		label += theme.MutedText.Render("  " + f.Help)
 	}
-	s += label + "\n"
+	// Skip label if the selection list is self-describing (has Display set).
+	showLabel := !m.isSelect()
+	if showLabel {
+		s += label + "\n"
+	}
 
 	switch {
 	case m.isSelect() && m.loading:
@@ -235,17 +239,23 @@ func (m *model) renderChoices() string {
 		return theme.MutedText.Render("  (no options available)") + "\n"
 	}
 	var s string
+	// Show column headers if the first choice has Help (used as header by SuggestFrom).
+	if m.choices[0].Help != "" {
+		s += "  " + theme.Label.Render(m.choices[0].Help) + "\n"
+	}
 	for i, c := range m.choices {
-		marker := "  "
-		line := c.Value
-		if c.Help != "" {
-			line += theme.MutedText.Render("  "+c.Help)
+		line := c.Display
+		if line == "" {
+			line = c.Value
+			if c.Help != "" {
+				line += theme.MutedText.Render("  "+c.Help)
+			}
 		}
 		if i == m.selIdx {
-			marker = theme.Key.Render("▸ ")
-			line = theme.Value.Render(line)
+			s += theme.Key.Render("▸") + " " + theme.Value.Render(line) + "\n"
+		} else {
+			s += "  " + line + "\n"
 		}
-		s += marker + line + "\n"
 	}
 	s += theme.MutedText.Render("  ↑/↓ select · enter confirm · esc cancel") + "\n"
 	return s

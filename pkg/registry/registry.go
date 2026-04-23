@@ -14,7 +14,9 @@ package registry
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -198,4 +200,92 @@ func (r *Registry) All() []Resource {
 	copy(out, r.list)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
+}
+
+// SuggestFrom builds a Suggest function that lists items from a Store,
+// rendering each as a compact table row of visible fields. The valueField
+// is the Flag name whose value is returned as Choice.Value (what gets
+// committed to Input). All table-visible fields are shown in Display.
+func SuggestFrom(store Store, fields []Field, valueField string) func(context.Context) ([]Choice, error) {
+	return func(ctx context.Context) ([]Choice, error) {
+		items, err := store.List(ctx, Filter{})
+		if err != nil {
+			return nil, err
+		}
+		// Collect visible columns.
+		type col struct {
+			header string
+			field  Field
+			width  int
+		}
+		var cols []col
+		for _, f := range fields {
+			if f.Table.Header == "" || f.Table.Wide {
+				continue
+			}
+			cols = append(cols, col{header: f.Table.Header, field: f, width: len(f.Table.Header)})
+		}
+		// Build rows and compute max widths.
+		rows := make([][]string, len(items))
+		for i, item := range items {
+			rv := reflect.Indirect(reflect.ValueOf(item))
+			row := make([]string, len(cols))
+			for j, c := range cols {
+				v := fieldValue(rv, c.field)
+				row[j] = v
+				if len(v) > cols[j].width {
+					cols[j].width = len(v)
+				}
+			}
+			rows[i] = row
+		}
+		// Format helper.
+		fmtRow := func(cells []string) string {
+			var b strings.Builder
+			for j, cell := range cells {
+				if j > 0 {
+					b.WriteString("  ")
+				}
+				fmt.Fprintf(&b, "%-*s", cols[j].width, cell)
+			}
+			return b.String()
+		}
+		// Build header line.
+		hdrs := make([]string, len(cols))
+		for j, c := range cols {
+			hdrs[j] = c.header
+		}
+		headerLine := fmtRow(hdrs)
+		// Build choices.
+		var choices []Choice
+		for i, item := range items {
+			rv := reflect.Indirect(reflect.ValueOf(item))
+			val := ""
+			for _, f := range fields {
+				if f.Flag == valueField {
+					val = fieldValue(rv, f)
+					break
+				}
+			}
+			choices = append(choices, Choice{
+				Value:   val,
+				Display: fmtRow(rows[i]),
+				Help:    headerLine,
+			})
+		}
+		return choices, nil
+	}
+}
+
+func fieldValue(rv reflect.Value, f Field) string {
+	for _, k := range []string{f.Name, f.Flag} {
+		if k == "" {
+			continue
+		}
+		fv := rv.FieldByNameFunc(func(s string) bool { return strings.EqualFold(s, k) })
+		if fv.IsValid() {
+			return fmt.Sprintf("%v", fv.Interface())
+		}
+	}
+	return ""
 }

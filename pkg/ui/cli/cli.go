@@ -85,11 +85,27 @@ func resourceCmd(res registry.Resource, g *Globals) *cobra.Command {
 	})
 
 	c.AddCommand(&cobra.Command{
-		Use:   "get <id>",
+		Use:   "get [id]",
 		Short: "get one " + res.Name,
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			item, err := res.Store.Get(cmd.Context(), args[0])
+			var id string
+			if len(args) > 0 {
+				id = args[0]
+			} else if g.Interactive() {
+				field := registry.Field{
+					Flag: "id", Required: true, Help: "select " + res.Name,
+					Suggest: registry.SuggestFrom(res.Store, res.Fields, res.Fields[0].Flag),
+				}
+				in := registry.Input{}
+				if err := wizard.Collect(cmd.Context(), []registry.Field{field}, in); err != nil {
+					return err
+				}
+				id = in.Get("id")
+			} else {
+				return fmt.Errorf("id argument required (or drop -y to select interactively)")
+			}
+			item, err := res.Store.Get(cmd.Context(), id)
 			if err != nil {
 				return err
 			}

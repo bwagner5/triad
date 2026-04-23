@@ -90,18 +90,20 @@ func (s *store) delete(id string) {
 
 // Resource returns the registry.Resource for containers.
 func Resource() registry.Resource {
+	fields := []registry.Field{
+		{Name: "ID", Flag: "id", Help: "container id", Table: registry.TableHint{Header: "ID"}},
+		{Name: "Name", Flag: "name", Short: "n", Help: "container name", Table: registry.TableHint{Header: "NAME"}},
+		{Name: "Image", Flag: "image", Help: "image", Table: registry.TableHint{Header: "IMAGE"}},
+		{Name: "Status", Flag: "status", Help: "status", Table: registry.TableHint{Header: "STATUS", Wide: true}},
+	}
+	suggest := registry.SuggestFrom(backend, fields, "name")
 	return registry.Resource{
 		Name:    "container",
 		Plural:  "containers",
 		Aliases: []string{"c", "ctr"},
 		Short:   "manage containers",
-		Fields: []registry.Field{
-			{Name: "ID", Flag: "id", Help: "container id", Table: registry.TableHint{Header: "ID"}},
-			{Name: "Name", Flag: "name", Short: "n", Help: "container name", Table: registry.TableHint{Header: "NAME"}},
-			{Name: "Image", Flag: "image", Help: "image", Table: registry.TableHint{Header: "IMAGE"}},
-			{Name: "Status", Flag: "status", Help: "status", Table: registry.TableHint{Header: "STATUS", Wide: true}},
-		},
-		Store: backend,
+		Fields:  fields,
+		Store:   backend,
 		Operations: map[string]registry.Operation{
 			"create": {
 				Name:  "create",
@@ -140,7 +142,7 @@ func Resource() registry.Resource {
 				Short:   "delete a container",
 				Confirm: "Delete this container? This cannot be undone.",
 				Fields: []registry.Field{
-					{Flag: "name", Short: "n", Help: "container name", Required: true, Suggest: suggestNames},
+					{Flag: "name", Short: "n", Help: "container name", Required: true, Suggest: suggest},
 				},
 				Steps: []registry.Step{
 					{Label: "Stop container", Do: func(_ context.Context, s *registry.State) error {
@@ -164,7 +166,7 @@ func Resource() registry.Resource {
 				Key:   "l",
 				Short: "stream logs",
 				Fields: []registry.Field{
-					{Flag: "name", Short: "n", Help: "container name", Required: true, Suggest: suggestNames},
+					{Flag: "name", Short: "n", Help: "container name", Required: true, Suggest: suggest},
 					{Flag: "follow", Short: "f", Help: "follow", Default: "false"},
 				},
 				Run: func(ctx context.Context, in registry.Input) error {
@@ -201,12 +203,4 @@ func mustList() []Container {
 		out = append(out, c)
 	}
 	return out
-}
-
-func suggestNames(_ context.Context) ([]registry.Choice, error) {
-	var cs []registry.Choice
-	for _, c := range mustList() {
-		cs = append(cs, registry.Choice{Value: c.Name, Help: c.Image})
-	}
-	return cs, nil
 }
