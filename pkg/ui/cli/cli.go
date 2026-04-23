@@ -21,11 +21,31 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Prompter collects values for missing required fields. The default
+// implementation (wizard.Collect) launches an inline bubbletea flow;
+// tests can inject a stub that auto-fills the Input map.
+type Prompter interface {
+	Collect(ctx context.Context, fields []registry.Field, in registry.Input) error
+}
+
+// prompterFunc adapts a plain function to the Prompter interface.
+type prompterFunc func(ctx context.Context, fields []registry.Field, in registry.Input) error
+
+func (f prompterFunc) Collect(ctx context.Context, fields []registry.Field, in registry.Input) error {
+	return f(ctx, fields, in)
+}
+
+// defaultPrompter is the production prompter backed by wizard.Collect.
+var defaultPrompter Prompter = prompterFunc(wizard.Collect)
+
 // Globals carries flags that every command inherits.
 type Globals struct {
 	Output         string // short | wide | yaml | json
 	NonInteractive bool   // true: never prompt, append-only log; false (default): prompt + live view
 	Verbose        bool
+	// Prompter overrides the interactive input collector. Nil means use the
+	// default wizard-based prompter. Set in tests to a stub.
+	Prompter Prompter
 }
 
 // Interactive returns true when the CLI should prompt for missing inputs
@@ -98,7 +118,11 @@ func resourceCmd(res registry.Resource, g *Globals) *cobra.Command {
 					Suggest: registry.SuggestFrom(res.Store, res.Fields, res.Fields[0].Flag),
 				}
 				in := registry.Input{}
-				if err := wizard.Collect(cmd.Context(), []registry.Field{field}, in); err != nil {
+				prompter := g.Prompter
+				if prompter == nil {
+					prompter = defaultPrompter
+				}
+				if err := prompter.Collect(cmd.Context(), []registry.Field{field}, in); err != nil {
 					return err
 				}
 				id = in.Get("id")
@@ -129,7 +153,7 @@ func sagaCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 		Use:   op.Name,
 		Short: op.Short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := completeInput(cmd.Context(), op.Fields, in, g.Interactive()); err != nil {
+			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
 				return err
 			}
 			return streamOp(cmd.Context(), cmd.OutOrStdout(), res, op, in, g.Interactive())
@@ -145,7 +169,7 @@ func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 		Use:   op.Name,
 		Short: op.Short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := completeInput(cmd.Context(), op.Fields, in, g.Interactive()); err != nil {
+			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
 				return err
 			}
 			return op.Run(cmd.Context(), in)
@@ -187,8 +211,9 @@ func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input) {
 	}
 }
 
-// completeInput validates required fields, launching the wizard when allowed.
-func completeInput(ctx context.Context, fields []registry.Field, in registry.Input, interactive bool) error {
+// CompleteInput validates required fields, launching the prompter when missing.
+// If prompter is nil and interactive is true, the default wizard is used.
+func CompleteInput(ctx context.Context, fields []registry.Field, in registry.Input, interactive bool, prompter Prompter) error {
 	missing := []registry.Field{}
 	for _, f := range fields {
 		if v, ok := in[f.Flag]; ok && v != "" {
@@ -213,7 +238,10 @@ func completeInput(ctx context.Context, fields []registry.Field, in registry.Inp
 		}
 		return fmt.Errorf("missing required flags: %v (pass --no-interactive=false or drop -y to prompt)", names)
 	}
-	return wizard.Collect(ctx, missing, in)
+	if prompter == nil {
+		prompter = defaultPrompter
+	}
+	return prompter.Collect(ctx, missing, in)
 }
 
 func streamOp(ctx context.Context, w io.Writer, res registry.Resource, op registry.Operation, in registry.Input, interactive bool) error {
