@@ -39,6 +39,8 @@ type Options struct {
 	// Logo, if non-empty, overrides the auto-generated ASCII banner derived
 	// from Name. Supply a pre-styled, multi-line string.
 	Logo string
+	// Version, if non-empty, is rendered centered in the bottom status bar.
+	Version string
 }
 
 // Run starts the full-screen TUI against the given registry.
@@ -754,11 +756,24 @@ func (a *app) renderBottom(w int) string {
 
 	lw := lipgloss.Width(left)
 	rw := lipgloss.Width(right)
-	fill := w - lw - rw
-	if fill < 1 {
-		fill = 1
+	version := ""
+	if a.opts.Version != "" {
+		version = theme.MutedText.Render(a.opts.Version)
 	}
-	return lipgloss.NewStyle().Width(w).Render(left + strings.Repeat(" ", fill) + right)
+	vw := lipgloss.Width(version)
+	// Center the version in the full width, then pad between it and the
+	// left/right chunks. If the right side overlaps the centered version,
+	// fall back to left-of-right placement.
+	leftFill := (w-vw)/2 - lw
+	rightFill := w - lw - leftFill - vw - rw
+	if leftFill < 1 || rightFill < 1 {
+		leftFill = 1
+		rightFill = w - lw - leftFill - vw - rw
+		if rightFill < 1 {
+			rightFill = 1
+		}
+	}
+	return lipgloss.NewStyle().Width(w).Render(left + strings.Repeat(" ", leftFill) + version + strings.Repeat(" ", rightFill) + right)
 }
 
 // dismissSagaMsg clears the saga overlay after the auto-dismiss timer fires.

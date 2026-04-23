@@ -41,6 +41,7 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 		SilenceUsage: true,
 	}
 	root.SetErrPrefix(theme.Err.Render("error:"))
+	root.SetVersionTemplate("{{.Version}}\n")
 	root.PersistentFlags().StringVarP(&g.Output, "output", "o", "short", "output: short|wide|yaml|json")
 	root.PersistentFlags().BoolVarP(&g.NonInteractive, "no-interactive", "y", false, "disable interactive prompts and live progress (for CI / scripts)")
 	root.PersistentFlags().BoolVar(&g.Verbose, "verbose", false, "verbose output")
