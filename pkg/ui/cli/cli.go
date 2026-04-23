@@ -4,8 +4,7 @@
 //
 //	<cli> <resource>                  -> list
 //	<cli> <resource> get <id>         -> detail
-//	<cli> <resource> <saga>           -> one sub-cmd per saga (create, delete, …)
-//	<cli> <resource> <action>         -> one sub-cmd per action (logs, exec, …)
+//	<cli> <resource> <op>             -> one sub-cmd per operation (create, delete, logs, …)
 //
 // It also installs a lipgloss-rendered help template and typo-suggestion output.
 package cli
@@ -13,7 +12,7 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/runtime"
@@ -133,7 +132,7 @@ func sagaCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 			if err := completeInput(cmd.Context(), op.Fields, in, g.Interactive()); err != nil {
 				return err
 			}
-			return streamSaga(cmd.Context(), res, op, in, g.Interactive())
+			return streamOp(cmd.Context(), cmd.OutOrStdout(), res, op, in, g.Interactive())
 		},
 	}
 	bindFields(c, op.Fields, in)
@@ -217,10 +216,10 @@ func completeInput(ctx context.Context, fields []registry.Field, in registry.Inp
 	return wizard.Collect(ctx, missing, in)
 }
 
-func streamSaga(ctx context.Context, res registry.Resource, op registry.Operation, in registry.Input, interactive bool) error {
+func streamOp(ctx context.Context, w io.Writer, res registry.Resource, op registry.Operation, in registry.Input, interactive bool) error {
 	ch := runtime.Run(ctx, nil, res, op, in)
 	if interactive {
 		return RenderEventsLive(ch)
 	}
-	return RenderEvents(os.Stdout, ch)
+	return RenderEvents(w, ch)
 }
