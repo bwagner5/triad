@@ -63,6 +63,7 @@ type app struct {
 	ctx   context.Context
 	reg   *registry.Registry
 	sched *runtime.Scheduler
+	bus   *runtime.Bus
 	opts  Options
 
 	width, height int
@@ -104,7 +105,7 @@ func newApp(ctx context.Context, reg *registry.Registry, opts Options) *app {
 	if opts.Logo == "" {
 		opts.Logo = lipgloss.NewStyle().Foreground(theme.Warning).Render(ascii.Render(opts.Name))
 	}
-	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), palette: newPalette(reg), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New(), initialLoad: true}
+	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), bus: runtime.NewBus(), palette: newPalette(reg), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New(), initialLoad: true}
 	fti := textinput.New()
 	fti.Prompt = "/ "
 	fti.Placeholder = "filter…"
@@ -381,9 +382,9 @@ func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
 	return a, a.subscribeBus()
 }
 
-// subscribeBus relays saga events (from CLI-originated sagas, if any) into the TUI.
+// subscribeBus relays saga events from the app's bus back into the TUI.
 func (a *app) subscribeBus() tea.Cmd {
-	ch := runtime.DefaultBus().Subscribe()
+	ch := a.bus.Subscribe()
 	return func() tea.Msg {
 		e, ok := <-ch
 		if !ok {

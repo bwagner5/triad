@@ -218,7 +218,7 @@ func completeInput(ctx context.Context, fields []registry.Field, in registry.Inp
 }
 
 func streamSaga(ctx context.Context, res registry.Resource, op registry.Operation, in registry.Input, interactive bool) error {
-	ch := runtime.Run(ctx, res, op, in)
+	ch := runtime.Run(ctx, nil, res, op, in)
 	if interactive {
 		return RenderEventsLive(ch)
 	}

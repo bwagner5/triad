@@ -51,7 +51,8 @@ type Event struct {
 
 // Run executes an operation's steps synchronously and streams events over the returned channel.
 // The channel is closed when the operation is complete.
-func Run(ctx context.Context, res registry.Resource, op registry.Operation, in registry.Input) <-chan Event {
+// If bus is non-nil, the final Done event is also published to it (for cross-component signaling).
+func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Operation, in registry.Input) <-chan Event {
 	ch := make(chan Event, len(op.Steps)+2)
 	go func() {
 		defer close(ch)
@@ -84,7 +85,9 @@ func Run(ctx context.Context, res registry.Resource, op registry.Operation, in r
 			final.Err = runErr
 			final.Index = lastIdx
 		}
-		defaultBus.Publish(final)
+		if bus != nil {
+			bus.Publish(final)
+		}
 		ch <- final
 	}()
 	return ch
@@ -97,11 +100,8 @@ type Bus struct {
 	subs []chan Event
 }
 
-var defaultBus = &Bus{}
-
-// DefaultBus returns the process-wide event bus. Any successful saga
-// publishes its Done event here so the refresh scheduler can bump polling.
-func DefaultBus() *Bus { return defaultBus }
+// NewBus creates an empty event bus.
+func NewBus() *Bus { return &Bus{} }
 
 // Subscribe returns a channel that receives future events. Caller must Unsubscribe.
 func (b *Bus) Subscribe() chan Event {

@@ -54,7 +54,7 @@ func (a *app) startSaga(msg startSagaMsg) tea.Cmd {
 	if msg.err != nil || msg.resource == nil || msg.op == nil {
 		return nil
 	}
-	ch := runtime.Run(a.ctx, *msg.resource, *msg.op, msg.input)
+	ch := runtime.Run(a.ctx, a.bus, *msg.resource, *msg.op, msg.input)
 	a.saga.Start(msg.op.Name)
 	return readSagaCmd(ch)
 }
