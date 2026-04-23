@@ -20,18 +20,19 @@ const cliName = "triad"
 
 func main() {
 	// 1) Declare resources. This is the main extension point.
-	registry.Register(container.Resource())
+	reg := registry.New()
+	reg.Register(container.Resource())
 
 	// 2) Build the CLI.
 	g := &cli.Globals{}
-	root := cli.Build(cliName, "CLI scaffold with CLI + wizard + TUI", registry.Default(), g)
+	root := cli.Build(cliName, "CLI scaffold with CLI + wizard + TUI", reg, g)
 	root.Version = "v" + version
 
 	// 3) Add the `tui` sub-command, and make it the default when no
 	//    sub-command is given.
 	tuiOpts := tui.Options{Name: cliName, Version: root.Version}
 	runTUI := func(cmd *cobra.Command, _ []string) error {
-		return tui.Run(cmd.Context(), registry.Default(), tuiOpts)
+		return tui.Run(cmd.Context(), reg, tuiOpts)
 	}
 	root.RunE = runTUI
 	root.AddCommand(&cobra.Command{

@@ -147,16 +147,8 @@ type Registry struct {
 	by   map[string]*Resource
 }
 
-var global = New()
-
-// Default returns the process-wide registry.
-func Default() *Registry { return global }
-
 // New builds an empty registry.
 func New() *Registry { return &Registry{by: map[string]*Resource{}} }
-
-// Register adds a resource to the default registry.
-func Register(r Resource) { global.Register(r) }
 
 // Register adds a resource. Names and aliases must be unique.
 func (r *Registry) Register(res Resource) {

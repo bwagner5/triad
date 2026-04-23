@@ -33,14 +33,15 @@ import (
 )
 
 func main() {
-    registry.Register(widget.Resource()) // your resource
+    reg := registry.New()
+    reg.Register(widget.Resource()) // your resource
 
     g := &cli.Globals{}
-    root := cli.Build("my-app", "manage widgets", registry.Default(), g)
+    root := cli.Build("my-app", "manage widgets", reg, g)
 
     // TUI as default command
     runTUI := func(cmd *cobra.Command, _ []string) error {
-        return tui.Run(cmd.Context(), registry.Default(), tui.Options{Name: "my-app"})
+        return tui.Run(cmd.Context(), reg, tui.Options{Name: "my-app"})
     }
     root.RunE = runTUI
     root.AddCommand(&cobra.Command{

@@ -93,7 +93,7 @@ func (s *store) delete(id string) {
 // ---- Resource definition ----
 
 // Resource returns the registry.Resource for containers. Call
-// registry.Register(container.Resource()) in main to wire it into all UIs.
+// reg.Register(container.Resource()) in main to wire it into all UIs.
 func Resource() registry.Resource {
 	fields := []registry.Field{
 		{Name: "ID", Flag: "id", Help: "container id", Table: registry.TableHint{Header: "ID"}},
