@@ -14,7 +14,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var version = "dev"
+var version = "0.0.0-dev"
 
 const cliName = "triad"
 
@@ -25,11 +25,11 @@ func main() {
 	// 2) Build the CLI.
 	g := &cli.Globals{}
 	root := cli.Build(cliName, "CLI scaffold with CLI + wizard + TUI", registry.Default(), g)
-	root.Version = version
+	root.Version = "v" + version
 
 	// 3) Add the `tui` sub-command, and make it the default when no
 	//    sub-command is given.
-	tuiOpts := tui.Options{Name: cliName}
+	tuiOpts := tui.Options{Name: cliName, Version: root.Version}
 	runTUI := func(cmd *cobra.Command, _ []string) error {
 		return tui.Run(cmd.Context(), registry.Default(), tuiOpts)
 	}
