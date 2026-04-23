@@ -76,3 +76,89 @@ func TestHelpOverlayCentered(t *testing.T) {
 		t.Errorf("Help modal not horizontally centered: col=%d, line=%q", col, lines[row])
 	}
 }
+
+// ---- §8 additions ----
+
+func TestFooterShowsVersion(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{Name: "thing", Plural: "things", Store: fakeStore{}})
+	a := newApp(context.Background(), reg, Options{Name: "test", Version: "v1.2.3"})
+	a.resource = ptr(reg.All()[0])
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	plain := stripANSI(m.(*app).View().Content)
+	lines := strings.Split(plain, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "v1.2.3") {
+		t.Errorf("footer missing version:\n%q", last)
+	}
+}
+
+func TestFooterEmptyVersionOK(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{Name: "thing", Plural: "things", Store: fakeStore{}})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	var m tea.Model = a
+	// Should not panic and render width-consistent footer.
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	_ = m.(*app).View()
+}
+
+func TestNumberKeySwitchesResource(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{Name: "alpha", Plural: "alphas", Store: fakeStore{}})
+	reg.Register(registry.Resource{Name: "beta", Plural: "betas", Store: fakeStore{}})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0]) // alpha
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m, _ = m.Update(tea.KeyPressMsg{Code: '1', Text: "1"})
+	if got := m.(*app).resource.Name; got != "beta" {
+		t.Errorf("after '1', resource = %q, want beta", got)
+	}
+}
+
+func TestPaletteOpensOnColon(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{Name: "thing", Plural: "things", Store: fakeStore{}})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m, _ = m.Update(tea.KeyPressMsg{Code: ':', Text: ":"})
+	if !m.(*app).showPalette {
+		t.Error("showPalette not set after ':'")
+	}
+}
+
+func TestHelpToggle(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{Name: "thing", Plural: "things", Store: fakeStore{}})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m, _ = m.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	if !m.(*app).showHelp {
+		t.Fatal("help not shown after '?'")
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEscape, Text: "esc"})
+	if m.(*app).showHelp {
+		t.Error("help still shown after 'esc'")
+	}
+}
+
+func TestTerminalTooSmallRendersEmpty(t *testing.T) {
+	reg := registry.New()
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 20, Height: 5})
+	v := m.(*app).View()
+	if v.Content != "" {
+		t.Errorf("expected empty view for tiny terminal, got %q", v.Content)
+	}
+}
