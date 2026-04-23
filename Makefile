@@ -3,12 +3,14 @@ BUILD_DIR ?= ./build
 
 GOLANGCI_LINT_VERSION ?= latest
 GORELEASER_VERSION ?= latest
+GOTESTSUM_VERSION ?= latest
 
 .PHONY: tools build test lint ci attribution snapshot clean docker help
 
 tools: ## Install required dev tools
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	go install github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
+	go install gotest.tools/gotestsum@$(GOTESTSUM_VERSION)
 
 ci: lint build test ## Run lint, build, and test (used by CI and local dev)
 
@@ -16,8 +18,10 @@ build: ## Build the binary
 	@mkdir -p $(BUILD_DIR)
 	go build -ldflags="-s -w -X main.version=$(VERSION)" -o $(BUILD_DIR)/triad ./cmd/triad
 
-test: ## Run tests
-	go test ./... -v -count=1
+test: ## Run tests with pretty output and coverage summary
+	gotestsum --format pkgname -- -count=1 -coverprofile=cover.out ./...
+	@echo
+	@go tool cover -func=cover.out | tail -n 1
 
 lint: ## Run golangci-lint
 	golangci-lint run
