@@ -12,6 +12,7 @@ type Scheduler struct {
 	Slow       time.Duration
 	Fast       time.Duration
 	FastWindow time.Duration
+	Clock      Clock
 
 	mu    sync.Mutex
 	until map[string]time.Time // resource -> deadline for fast polling
@@ -22,6 +23,7 @@ func NewScheduler() *Scheduler {
 		Slow:       10 * time.Second,
 		Fast:       1 * time.Second,
 		FastWindow: 10 * time.Second,
+		Clock:      RealClock{},
 		until:      map[string]time.Time{},
 	}
 }
@@ -30,7 +32,7 @@ func NewScheduler() *Scheduler {
 func (s *Scheduler) Interval(resource string) time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if t, ok := s.until[resource]; ok && time.Now().Before(t) {
+	if t, ok := s.until[resource]; ok && s.Clock.Now().Before(t) {
 		return s.Fast
 	}
 	return s.Slow
@@ -40,5 +42,5 @@ func (s *Scheduler) Interval(resource string) time.Duration {
 func (s *Scheduler) Bump(resource string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.until[resource] = time.Now().Add(s.FastWindow)
+	s.until[resource] = s.Clock.Now().Add(s.FastWindow)
 }
