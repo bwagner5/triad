@@ -87,18 +87,7 @@ type Step struct {
 	Skip  func(s *State) bool                       // optional
 }
 
-// Saga is a named, ordered workflow.
-//
-// Deprecated: Use Operation instead. Saga is kept as a type alias for migration.
-type Saga = Operation
-
-// Action is a resource-specific verb.
-//
-// Deprecated: Use Operation instead. Action is kept as a type alias for migration.
-type Action = Operation
-
-// Operation is a named verb on a resource. It unifies what were previously
-// separate Saga and Action types.
+// Operation is a named verb on a resource.
 //
 // An Operation with Steps is a multi-step workflow: the runtime executes each
 // step in order, emits progress events, and runs Undo on prior steps if one
