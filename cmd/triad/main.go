@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 
 	"github.com/bwagner5/triad/pkg/attribution"
 	"github.com/bwagner5/triad/pkg/registry"
@@ -26,7 +27,7 @@ func main() {
 	// 2) Build the CLI.
 	g := &cli.Globals{}
 	root := cli.Build(cliName, "CLI scaffold with CLI + wizard + TUI", reg, g)
-	root.Version = "v" + version
+	root.Version = "v" + strings.TrimPrefix(version, "v")
 
 	// 3) Add the `tui` sub-command, and make it the default when no
 	//    sub-command is given.
