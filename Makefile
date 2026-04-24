@@ -24,7 +24,7 @@ test: ## Run tests with pretty output and coverage summary
 	@go tool cover -func=cover.out | tail -n 1
 
 lint: ## Run golangci-lint
-	golangci-lint run
+	golangci-lint run --timeout 5m0s --fix ./...
 
 attribution: ## Generate ATTRIBUTION.md from dependency licenses
 	./hack/gen_licenses.sh
