@@ -150,8 +150,9 @@ func resourceCmd(res registry.Resource, g *Globals) *cobra.Command {
 func sagaCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Command {
 	in := registry.Input{}
 	c := &cobra.Command{
-		Use:   op.Name,
-		Short: op.Short,
+		Use:     op.Name,
+		Aliases: op.Aliases,
+		Short:   op.Short,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
 				return err
@@ -166,8 +167,9 @@ func sagaCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Command {
 	in := registry.Input{}
 	c := &cobra.Command{
-		Use:   op.Name,
-		Short: op.Short,
+		Use:     op.Name,
+		Aliases: op.Aliases,
+		Short:   op.Short,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
 				return err

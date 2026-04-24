@@ -99,8 +99,11 @@ type Step struct {
 // Both kinds share the same Fields, Key, Confirm, and Short metadata so they
 // surface identically in CLI help, the wizard, and TUI key bindings.
 type Operation struct {
-	Name  string
-	Short string
+	Name string
+	// Aliases are additional names the operation responds to (e.g. "rm" for "delete").
+	// Each alias becomes a sibling cobra sub-command that runs the same op.
+	Aliases []string
+	Short   string
 	// Key is an optional TUI key binding (e.g. "c", "ctrl+d", "l"). When set,
 	// the TUI dispatches this key to launch the operation. Empty means the
 	// operation is available only via the command palette or CLI.
