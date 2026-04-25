@@ -8,6 +8,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/trace"
 	"github.com/bwagner5/triad/pkg/ui/theme"
 )
 
@@ -198,16 +199,21 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 
 func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	trace.Log("tui.wizard.key",
+		"key", key, "idx", wo.idx, "isSelect", wo.isSelect(wo.idx),
+		"loading", wo.idx < len(wo.loading) && wo.loading[wo.idx],
+		"choices", len(wo.choices[wo.idx]), "selIdx", wo.selIdx[wo.idx],
+	)
 	switch key {
 	case "ctrl+c", "esc":
 		wo.Clear()
 		return nil
-	case "tab", "down":
+	case "tab":
 		if wo.idx < len(wo.fields)-1 {
 			return wo.focusField(wo.idx + 1)
 		}
 		return nil
-	case "shift+tab", "up":
+	case "shift+tab":
 		if wo.idx > 0 {
 			return wo.focusField(wo.idx - 1)
 		}
@@ -216,20 +222,35 @@ func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		return wo.submit()
 	}
 	// Selection list navigation for Suggest fields.
+	// up/down/j/k all move the list cursor. If the current field is a text
+	// input, up/down act as tab/shift-tab (field nav).
 	if wo.isSelect(wo.idx) && !wo.loading[wo.idx] {
 		switch key {
-		case "j":
+		case "j", "down":
 			if wo.selIdx[wo.idx] < len(wo.choices[wo.idx])-1 {
 				wo.selIdx[wo.idx]++
 			}
 			return nil
-		case "k":
+		case "k", "up":
 			if wo.selIdx[wo.idx] > 0 {
 				wo.selIdx[wo.idx]--
 			}
 			return nil
 		}
 		return nil // consume other keys on select fields
+	}
+	// Text input field: up/down navigate between fields.
+	switch key {
+	case "down":
+		if wo.idx < len(wo.fields)-1 {
+			return wo.focusField(wo.idx + 1)
+		}
+		return nil
+	case "up":
+		if wo.idx > 0 {
+			return wo.focusField(wo.idx - 1)
+		}
+		return nil
 	}
 	// Forward to text input.
 	if wo.idx < len(wo.inputs) {
