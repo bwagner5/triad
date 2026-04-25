@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
 	"github.com/bwagner5/triad/pkg/duration"
@@ -30,7 +30,7 @@ import (
 	"github.com/bwagner5/triad/pkg/ui/theme"
 )
 
-func reflectIndirect(v any) reflect.Value { return reflect.Indirect(reflect.ValueOf(v)) }
+func reflectIndirect(v any) reflect.Value                 { return reflect.Indirect(reflect.ValueOf(v)) }
 func readField(rv reflect.Value, f registry.Field) string { return read(rv, f) }
 
 // Options configures the TUI.
@@ -104,6 +104,11 @@ type app struct {
 	saga    sagaOverlay
 	confirm confirmOverlay
 	wizard  wizardOverlay
+
+	// sagaProvide is set when a running saga emitted NeedsInput and the
+	// wizard is collecting the missing fields. The next wizardDoneMsg
+	// feeds the answers back to the runtime via this callback.
+	sagaProvide func(registry.Input)
 
 	showPalette bool
 	showHelp    bool
@@ -394,7 +399,22 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
-	trace.Log("tui.wizardDone", "op", msg.op.Name, "hasRun", msg.op.Run != nil, "hasSteps", len(msg.op.Steps) > 0)
+	trace.Log("tui.wizardDone", "op", msg.op.Name, "hasRun", msg.op.Run != nil, "hasSteps", len(msg.op.Steps) > 0, "hasSagaProvide", a.sagaProvide != nil, "canceled", msg.input == nil)
+	// If a saga is paused waiting for input, hand the answers (or nil on
+	// cancel) to its Provide callback and let the runtime decide.
+	if a.sagaProvide != nil {
+		provide := a.sagaProvide
+		a.sagaProvide = nil
+		answers := msg.input
+		return a, func() tea.Msg {
+			provide(answers)
+			return nil
+		}
+	}
+	// Non-saga cancel: drop on the floor.
+	if msg.input == nil {
+		return a, nil
+	}
 	if msg.op != nil && msg.op.Confirm != "" {
 		a.confirm.Show(msg.op.Confirm, msg.resource, msg.op, msg.input)
 		return a, nil
@@ -457,6 +477,17 @@ func (a *app) handlePaletteChoice(msg paletteResultMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
+	if ev.Status == runtime.NeedsInput && ev.Needs != nil && ev.Provide != nil {
+		// Pause the saga: stash Provide, open the wizard overlay, keep
+		// reading further saga events (in case ctx cancels from outside).
+		trace.Log("tui.saga.needsInput", "step", ev.Step, "fields", len(ev.Needs.Fields))
+		a.sagaProvide = ev.Provide
+		input := registry.Input{}
+		return a, tea.Batch(
+			a.wizard.Show(a.ctx, nil, sagaNeedOp(ev.Needs), ev.Needs.Fields, input),
+			a.subscribeBus(),
+		)
+	}
 	a.saga.Push(ev)
 	if ev.Done {
 		a.sched.Bump(ev.Resource)
@@ -469,6 +500,16 @@ func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(a.saga.DismissAfter(), a.refresh(), a.subscribeBus(), toastCmd)
 	}
 	return a, a.subscribeBus()
+}
+
+// sagaNeedOp is a synthetic Operation just so the wizard overlay has a
+// name to render for a NeedsInput prompt. It is never executed.
+func sagaNeedOp(n *registry.NeedInput) *registry.Operation {
+	name := "additional input"
+	if n.Reason != "" {
+		name = n.Reason
+	}
+	return &registry.Operation{Name: name, Fields: n.Fields}
 }
 
 // subscribeBus relays saga events from the app's bus back into the TUI.
@@ -504,8 +545,8 @@ func (a *app) View() tea.View {
 		return tea.NewView("")
 	}
 
-	header := a.renderHeader(w)  // headerH rows
-	bottom := a.renderBottom(w)  // 1 row: pills + key hints
+	header := a.renderHeader(w) // headerH rows
+	bottom := a.renderBottom(w) // 1 row: pills + key hints
 	bodyH := h - headerH - 1
 	if bodyH < 3 {
 		bodyH = 3
@@ -590,8 +631,9 @@ func centeredLayer(content string, w, h, z int) *lipgloss.Layer {
 }
 
 // renderHeader builds the top block:
-//   rows 0-4: auto-generated ASCII banner for the CLI name (or user override).
-//   row 5:    toast (or blank).
+//
+//	rows 0-4: auto-generated ASCII banner for the CLI name (or user override).
+//	row 5:    toast (or blank).
 func (a *app) renderHeader(w int) string {
 	banner := a.opts.Logo
 	bannerLine := lipgloss.NewStyle().Width(w).Padding(0, 1).Render(banner)

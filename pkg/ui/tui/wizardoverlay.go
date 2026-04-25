@@ -206,8 +206,11 @@ func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	)
 	switch key {
 	case "ctrl+c", "esc":
+		// Preserve the op/resource so the saga's Provide callback can be
+		// informed of the cancellation via handleWizardDone(input=nil).
+		op, res := wo.op, wo.resource
 		wo.Clear()
-		return nil
+		return func() tea.Msg { return wizardDoneMsg{resource: res, op: op, input: nil} }
 	case "tab":
 		if wo.idx < len(wo.fields)-1 {
 			return wo.focusField(wo.idx + 1)

@@ -10,6 +10,64 @@ import (
 	"github.com/bwagner5/triad/pkg/runtime"
 )
 
+
+func TestRunNeedsInputResumes(t *testing.T) {
+	// Step "verify" fails first call with NeedInput; after the runtime
+	// injects the answer, it succeeds.
+	calls := 0
+	verify := registry.Step{
+		Label: "verify",
+		Do: func(_ context.Context, s *registry.State) error {
+			calls++
+			if s.Input.Get("name") == "" {
+				return &registry.NeedInput{
+					Fields: []registry.Field{{Flag: "name", Required: true}},
+					Reason: "app missing",
+				}
+			}
+			return nil
+		},
+	}
+	op := registry.Operation{Name: "deploy", Steps: []registry.Step{verify}}
+	ch := runtime.Run(context.Background(), nil, registry.Resource{Name: "app"}, op, registry.Input{})
+
+	sawNeed := false
+	for e := range ch {
+		if e.Status == runtime.NeedsInput {
+			sawNeed = true
+			if e.Needs == nil || e.Provide == nil {
+				t.Fatalf("NeedsInput event missing payload: %+v", e)
+			}
+			// Supply the answer.
+			e.Provide(registry.Input{"name": "foo"})
+		}
+	}
+	if !sawNeed {
+		t.Error("expected a NeedsInput event")
+	}
+	if calls != 2 {
+		t.Errorf("verify called %d times, want 2 (first = NeedInput, second = ok)", calls)
+	}
+}
+
+func TestRunNeedsInputAbort(t *testing.T) {
+	verify := registry.Step{
+		Label: "verify",
+		Do: func(_ context.Context, _ *registry.State) error {
+			return &registry.NeedInput{Fields: []registry.Field{{Flag: "x", Required: true}}}
+		},
+	}
+	op := registry.Operation{Name: "deploy", Steps: []registry.Step{verify}}
+	ch := runtime.Run(context.Background(), nil, registry.Resource{Name: "app"}, op, registry.Input{})
+
+	for e := range ch {
+		if e.Status == runtime.NeedsInput {
+			e.Provide(nil) // abort
+		}
+	}
+	// Nothing to assert structurally — the test proves the goroutine
+	// terminates (no leak). If Provide(nil) deadlocked, go test would hang.
+}
 // drain reads all events from ch until closed.
 func drain(ch <-chan runtime.Event) []runtime.Event {
 	var out []runtime.Event

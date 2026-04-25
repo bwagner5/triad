@@ -72,6 +72,36 @@ type Store interface {
 	List(ctx context.Context, f Filter) ([]any, error)
 }
 
+// NeedInput is an error value a saga Step can return to signal that it
+// needs additional fields from the user before it can proceed.
+//
+// When the runtime sees this error, it pauses the saga, asks the UI layer
+// to collect the listed Fields, merges the result into State.Input, and
+// retries the SAME step. Steps should be written to idempotently re-check
+// what's already in State.Input; returning NeedInput on every call would
+// loop forever.
+//
+// Typical use: a "verify app exists" step that, when the app is missing,
+// asks for the inputs a "create app" sub-flow requires.
+type NeedInput struct {
+	// Fields are the registry.Field values the user must fill in. They
+	// flow into the existing wizard renderer, so Suggest / Validate /
+	// Required all behave the same as for top-level op Fields.
+	Fields []Field
+	// Reason is shown to the user above the wizard (e.g. "App 'foo'
+	// doesn't exist yet — fill these in to create it now").
+	Reason string
+}
+
+// Error implements error. The runtime never surfaces this string to the
+// user — callers match via errors.As.
+func (e *NeedInput) Error() string {
+	if e.Reason != "" {
+		return "input required: " + e.Reason
+	}
+	return "input required"
+}
+
 // StreamStore is an optional extension: stores whose List fans out across
 // slow backends (multi-region APIs, paged catalogs) can implement StreamList
 // to push incremental batches to the UI instead of blocking for the full set.

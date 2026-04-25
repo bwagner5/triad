@@ -103,10 +103,21 @@ func equalFold(a, b string) bool {
 }
 
 // RenderEvents prints saga events to w with spinners/checkmarks.
-// It reads until the channel is closed.
+// It reads until the channel is closed. In non-interactive mode, a
+// NeedsInput event aborts the saga (the consumer has no way to prompt).
 func RenderEvents(w io.Writer, ch <-chan runtime.Event) error {
 	var finalErr error
 	for e := range ch {
+		if e.Status == runtime.NeedsInput {
+			// No UI to prompt in CI mode — abort the saga by passing nil.
+			// The runtime will emit a Failed event which we render below.
+			if e.Provide != nil {
+				e.Provide(nil)
+			}
+			_, _ = fmt.Fprintf(w, "%s %s — needs input (%s); pass the missing fields as flags or drop -y\n",
+				theme.ErrMark, e.Step, needsInputReason(e.Needs))
+			continue
+		}
 		if e.Done {
 			if e.Status == runtime.Failed {
 				fmt.Fprintln(w, theme.Err.Render("✗ ")+e.Saga+" failed: "+errStr(e.Err)) //nolint:errcheck
@@ -128,6 +139,13 @@ func RenderEvents(w io.Writer, ch <-chan runtime.Event) error {
 		}
 	}
 	return finalErr
+}
+
+func needsInputReason(n *registry.NeedInput) string {
+	if n == nil || n.Reason == "" {
+		return "input required"
+	}
+	return n.Reason
 }
 
 func errStr(err error) string {

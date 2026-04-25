@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
 	"github.com/bwagner5/triad/pkg/runtime"
@@ -9,10 +11,10 @@ import (
 
 // RenderEventsLive renders saga events inline with a single spinner that
 // rewrites itself: the running step shows a spinner, completed steps show
-// a checkmark, failures show a cross. One line per step — no intermediate
-// "started" lines.
+// a checkmark, failures show a cross. NeedsInput events suspend rendering,
+// prompt for the missing fields via wizard.Collect, and then resume.
 func RenderEventsLive(ch <-chan runtime.Event) error {
-	m := &liveModel{ch: ch, sp: spinner.New()}
+	m := &liveModel{ctx: context.Background(), ch: ch, sp: spinner.New()}
 	fm, err := tea.NewProgram(m).Run()
 	if err != nil {
 		return err
@@ -21,12 +23,13 @@ func RenderEventsLive(ch <-chan runtime.Event) error {
 }
 
 type liveModel struct {
-	ch     <-chan runtime.Event
-	sp     spinner.Model
-	steps  []runtime.Event // latest state per step index
-	saga   string
-	done   bool
-	err    error
+	ctx   context.Context
+	ch    <-chan runtime.Event
+	sp    spinner.Model
+	steps []runtime.Event // latest state per step index
+	saga  string
+	done  bool
+	err   error
 }
 
 type eventMsg runtime.Event
@@ -49,6 +52,11 @@ func (m *liveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case eventMsg:
 		e := runtime.Event(msg)
 		m.saga = e.Saga
+		if e.Status == runtime.NeedsInput {
+			// Suspend the live renderer, run the inline wizard on the real
+			// tty, and hand results back via Provide. Then resume.
+			return m, m.needInput(e)
+		}
 		if e.Done {
 			m.done = true
 			m.err = e.Err
@@ -58,6 +66,8 @@ func (m *liveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.steps = append(m.steps, runtime.Event{})
 		}
 		m.steps[e.Index] = e
+		return m, waitEvent(m.ch)
+	case waitEventMsg:
 		return m, waitEvent(m.ch)
 	case closedMsg:
 		return m, tea.Quit
@@ -72,6 +82,23 @@ func (m *liveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
+
+// needInput runs wizard.Collect over the step's requested fields via
+// tea.Exec (suspends the renderer), then calls Provide and resumes the
+// saga. Esc / wizard error is delivered as nil answer, which the runtime
+// treats as "abort".
+func (m *liveModel) needInput(e runtime.Event) tea.Cmd {
+	return tea.Exec(&wizardExec{
+		ctx:     m.ctx,
+		need:    e.Needs,
+		provide: e.Provide,
+	}, func(err error) tea.Msg {
+		_ = err
+		return waitEventMsg{}
+	})
+}
+
+type waitEventMsg struct{}
 
 func (m *liveModel) View() tea.View {
 	s := ""

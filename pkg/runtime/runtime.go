@@ -3,6 +3,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -18,6 +19,10 @@ const (
 	OK
 	Failed
 	Skipped
+	// NeedsInput is emitted when a step returned registry.NeedInput. The
+	// saga is paused; the consumer must fill Event.Provide with the
+	// collected fields (or call it with nil to abort).
+	NeedsInput
 )
 
 func (s Status) String() string {
@@ -32,6 +37,8 @@ func (s Status) String() string {
 		return "failed"
 	case Skipped:
 		return "skipped"
+	case NeedsInput:
+		return "needs_input"
 	}
 	return "unknown"
 }
@@ -47,6 +54,13 @@ type Event struct {
 	Err      error
 	At       time.Time
 	Done     bool // true on the final event
+
+	// ---- NeedsInput payload ----
+	// Needs is populated when Status == NeedsInput. The consumer renders a
+	// wizard over these fields, then calls Provide exactly once with the
+	// collected answers (or a nil map to abort the saga).
+	Needs   *registry.NeedInput
+	Provide func(answers registry.Input)
 }
 
 // Run executes an operation's steps synchronously and streams events over the returned channel.
@@ -66,10 +80,27 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Skipped, At: time.Now()}
 				continue
 			}
-			ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Running, At: time.Now()}
-			if err := step.Do(ctx, st); err != nil {
-				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Failed, Err: err, At: time.Now()}
-				runErr = err
+			// A step may return registry.NeedInput; the runtime pauses,
+			// asks the consumer for the listed fields, and retries the
+			// same step. Runs at most 8 times per step to prevent loops.
+			var stepErr error
+			for attempt := 0; attempt < 8; attempt++ {
+				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Running, At: time.Now()}
+				stepErr = step.Do(ctx, st)
+				var need *registry.NeedInput
+				if !errors.As(stepErr, &need) {
+					break
+				}
+				if !solicitInput(ctx, ch, op, res, step, i, total, st, need) {
+					// consumer declined; treat as step failure
+					stepErr = errors.New("input required but not provided")
+					break
+				}
+				// retry with merged input
+			}
+			if stepErr != nil {
+				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Failed, Err: stepErr, At: time.Now()}
+				runErr = stepErr
 				for j := i - 1; j >= 0; j-- {
 					if op.Steps[j].Undo != nil {
 						_ = op.Steps[j].Undo(ctx, st)
@@ -91,6 +122,39 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 		ch <- final
 	}()
 	return ch
+}
+
+// solicitInput emits a NeedsInput event with a Provide callback and waits
+// for the consumer to reply. Returns true on success (answers merged into
+// state), false if the consumer aborts.
+func solicitInput(
+	ctx context.Context, ch chan<- Event, op registry.Operation, res registry.Resource,
+	step registry.Step, i, total int, st *registry.State, need *registry.NeedInput,
+) bool {
+	answer := make(chan registry.Input, 1)
+	provide := func(in registry.Input) {
+		select {
+		case answer <- in:
+		default:
+		}
+	}
+	ch <- Event{
+		Saga: op.Name, Resource: res.Name, Step: step.Label,
+		Index: i, Total: total, Status: NeedsInput, At: time.Now(),
+		Needs: need, Provide: provide,
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case in := <-answer:
+		if in == nil {
+			return false
+		}
+		for k, v := range in {
+			st.Input[k] = v
+		}
+		return true
+	}
 }
 
 // ---- Event bus (for TUI refresh scheduler + cross-component signaling) ----
