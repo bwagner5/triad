@@ -203,8 +203,31 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 	if !wo.active {
 		return false, nil
 	}
-	// If the focused field is a filepicker, let it handle everything
-	// first — including its own j/k navigation and directory changes.
+	// Non-key, non-wizard messages (readDirMsg from filepicker.Init, etc.)
+	// need to reach every picker regardless of focus — the picker filters
+	// by its own id internally. Without this, pickers built for non-focused
+	// fields never receive their initial directory listing and the UI
+	// shows "Bummer. No Files Found."
+	if _, isKey := msg.(tea.KeyPressMsg); !isKey {
+		if _, isSuggest := msg.(wizardSuggestMsg); !isSuggest {
+			var cmds []tea.Cmd
+			for i := range wo.pickers {
+				if wo.pickers[i] == nil {
+					continue
+				}
+				fp := *wo.pickers[i]
+				newFp, cmd := fp.Update(msg)
+				wo.pickers[i] = &newFp
+				if cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+			if len(cmds) > 0 {
+				return true, tea.Batch(cmds...)
+			}
+		}
+	}
+	// If the focused field is a filepicker, let it handle keystrokes.
 	// handleKey below still intercepts tab/shift-tab/enter at submit time.
 	if wo.isFile(wo.idx) && wo.pickers[wo.idx] != nil {
 		if key, ok := msg.(tea.KeyPressMsg); ok {
@@ -216,7 +239,7 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 		newFp, cmd := fp.Update(msg)
 		wo.pickers[wo.idx] = &newFp
 		if didSelect, path := newFp.DidSelectFile(msg); didSelect {
-			wo.pickers[wo.idx].Path = path // explicit (Update already sets it, be safe)
+			wo.pickers[wo.idx].Path = path
 		}
 		return true, cmd
 	}
