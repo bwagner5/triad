@@ -322,9 +322,12 @@ func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool) string {
 	var s strings.Builder
 	for i, c := range cs {
 		marker := "    "
-		line := c.Value
-		if c.Help != "" {
-			line += theme.MutedText.Render("  " + c.Help)
+		line := c.Display
+		if line == "" {
+			line = c.Value
+			if c.Help != "" {
+				line += theme.MutedText.Render("  " + c.Help)
+			}
 		}
 		if i == sel {
 			if focused {
