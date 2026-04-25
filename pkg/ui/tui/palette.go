@@ -15,6 +15,7 @@ type paletteKind int
 
 const (
 	paletteNav paletteKind = iota
+	paletteGlobal
 )
 
 type paletteEntry struct {
@@ -22,6 +23,7 @@ type paletteEntry struct {
 	display  string
 	short    string
 	resource *registry.Resource
+	op       *registry.Operation // set for paletteGlobal
 }
 
 type paletteResultMsg struct {
@@ -37,15 +39,19 @@ type paletteModel struct {
 	w, h    int
 }
 
-func newPalette(reg *registry.Registry) paletteModel {
+func newPalette(reg *registry.Registry, globalOps []registry.Operation) paletteModel {
 	var entries []paletteEntry
 	for _, res := range reg.All() {
 		r := res
 		entries = append(entries, paletteEntry{kind: paletteNav, display: r.Plural, short: r.Short, resource: &r})
 	}
+	for i := range globalOps {
+		op := globalOps[i]
+		entries = append(entries, paletteEntry{kind: paletteGlobal, display: op.Name, short: op.Short, op: &op})
+	}
 	ti := textinput.New()
 	ti.Prompt = ": "
-	ti.Placeholder = "switch resource…"
+	ti.Placeholder = "switch resource or run…"
 	m := paletteModel{ti: ti, entries: entries}
 	m.filter("")
 	return m
@@ -120,7 +126,10 @@ func (m paletteModel) Box(w, _ int) string {
 			prefix = theme.Key.Render("▸ ")
 		}
 		tag := ""
-		rows += fmt.Sprintf("%s%s %s  %s\n", prefix, tag, e.display, theme.MutedText.Render(e.short))
+		if e.kind == paletteGlobal {
+			tag = theme.Key.Render("·") + " "
+		}
+		rows += fmt.Sprintf("%s%s%s  %s\n", prefix, tag, e.display, theme.MutedText.Render(e.short))
 	}
 	return theme.Border.Width(width).Render(m.ti.View() + "\n" + rows)
 }

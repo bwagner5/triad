@@ -50,11 +50,17 @@ func (a *app) launchOp(res *registry.Resource, op *registry.Operation, input reg
 }
 
 // startSaga fires a multi-step operation and wires events into the overlay.
+// A nil resource is allowed for global ops (region switch etc.) — the saga
+// events just carry an empty resource name.
 func (a *app) startSaga(msg startSagaMsg) tea.Cmd {
-	if msg.err != nil || msg.resource == nil || msg.op == nil {
+	if msg.err != nil || msg.op == nil {
 		return nil
 	}
-	ch := runtime.Run(a.ctx, a.bus, *msg.resource, *msg.op, msg.input)
+	var res registry.Resource
+	if msg.resource != nil {
+		res = *msg.resource
+	}
+	ch := runtime.Run(a.ctx, a.bus, res, *msg.op, msg.input)
 	a.saga.Start(msg.op.Name)
 	return readSagaCmd(ch)
 }

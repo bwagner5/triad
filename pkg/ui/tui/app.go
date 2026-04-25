@@ -41,6 +41,16 @@ type Options struct {
 	Logo string
 	// Version, if non-empty, is rendered centered in the bottom status bar.
 	Version string
+	// Context, if non-nil, is called on every repaint to produce a short
+	// human-readable label for the current operating context (e.g. a region
+	// name, account ID, kube context). Rendered in the bottom status bar
+	// between the version and the key hints. Keep output to ~20 chars.
+	Context func() string
+	// GlobalOps are cross-cutting operations the TUI exposes via key
+	// bindings + the command palette. They are not attached to any
+	// resource; they typically change session state (region switch, auth
+	// context, theme) that affects every resource.
+	GlobalOps []registry.Operation
 }
 
 // Run starts the full-screen TUI against the given registry.
@@ -105,7 +115,7 @@ func newApp(ctx context.Context, reg *registry.Registry, opts Options) *app {
 	if opts.Logo == "" {
 		opts.Logo = lipgloss.NewStyle().Foreground(theme.Warning).Render(ascii.Render(opts.Name))
 	}
-	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), bus: runtime.NewBus(), palette: newPalette(reg), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New(), initialLoad: true}
+	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), bus: runtime.NewBus(), palette: newPalette(reg, opts.GlobalOps), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New(), initialLoad: true}
 	fti := textinput.New()
 	fti.Prompt = "/ "
 	fti.Placeholder = "filter…"
@@ -124,6 +134,9 @@ type itemsMsg struct {
 	resource string
 	items    []any
 	err      error
+	streamed bool                  // true when this is a partial batch from StreamList (append, don't replace)
+	final    bool                  // true when streaming is complete
+	next     <-chan registry.Batch // when non-nil, caller should read another batch from it
 }
 type sagaEventMsg runtime.Event
 
@@ -144,10 +157,72 @@ func (a *app) refresh() tea.Cmd {
 	}
 	a.refreshing = true
 	res := a.resource
+	// If the Store is streaming-capable, consume its channel and emit one
+	// itemsMsg per batch so the UI can render progressively. Otherwise
+	// fall back to the blocking List.
+	if ss, ok := res.Store.(registry.StreamStore); ok {
+		// Reset items so the first batch replaces, not appends to, the
+		// previous refresh cycle's results.
+		a.items = a.items[:0]
+		ch := ss.StreamList(a.ctx, registry.Filter{})
+		return a.readStream(res.Name, ch)
+	}
 	return func() tea.Msg {
 		items, err := res.Store.List(a.ctx, registry.Filter{})
-		return itemsMsg{resource: res.Name, items: items, err: err}
+		return itemsMsg{resource: res.Name, items: items, err: err, final: true}
 	}
+}
+
+// readStream reads one batch off ch and posts it as an itemsMsg.
+func (a *app) readStream(name string, ch <-chan registry.Batch) tea.Cmd {
+	return func() tea.Msg {
+		b, ok := <-ch
+		if !ok {
+			return itemsMsg{resource: name, streamed: true, final: true}
+		}
+		return itemsMsg{resource: name, items: b.Items, err: b.Err, streamed: true, next: ch}
+	}
+}
+
+// handleItems applies an incoming itemsMsg (streaming or blocking). Split
+// out of Update to keep gocyclo happy.
+func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
+	if a.resource == nil || msg.resource != a.resource.Name {
+		return a, nil
+	}
+	if !msg.streamed {
+		a.items, a.err = msg.items, msg.err
+		a.refreshing = false
+		a.initialLoad = false
+		if a.cursor >= len(a.items) {
+			a.cursor = 0
+		}
+		a.lastRefresh = time.Now()
+		a.nextRefresh = a.lastRefresh.Add(a.sched.Interval(a.resource.Name))
+		return a, a.scheduleRefresh()
+	}
+	// Streaming: per-batch append; error batches become toasts but don't stop the stream.
+	if msg.err != nil {
+		cmds := []tea.Cmd{a.showToast(toastErr, msg.err.Error())}
+		if msg.next != nil {
+			cmds = append(cmds, a.readStream(msg.resource, msg.next))
+		}
+		return a, tea.Batch(cmds...)
+	}
+	if len(msg.items) > 0 {
+		a.items = append(a.items, msg.items...)
+	}
+	if msg.final {
+		a.refreshing = false
+		a.initialLoad = false
+		a.lastRefresh = time.Now()
+		a.nextRefresh = a.lastRefresh.Add(a.sched.Interval(a.resource.Name))
+		return a, a.scheduleRefresh()
+	}
+	if msg.next != nil {
+		return a, a.readStream(msg.resource, msg.next)
+	}
+	return a, nil
 }
 
 func (a *app) scheduleRefresh() tea.Cmd {
@@ -170,17 +245,7 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		return a.handleKey(msg)
 	case itemsMsg:
-		if a.resource != nil && msg.resource == a.resource.Name {
-			a.items, a.err = msg.items, msg.err
-			a.refreshing = false
-			a.initialLoad = false
-			if a.cursor >= len(a.items) {
-				a.cursor = 0
-			}
-			a.lastRefresh = time.Now()
-			a.nextRefresh = a.lastRefresh.Add(a.sched.Interval(a.resource.Name))
-		}
-		return a, a.scheduleRefresh()
+		return a.handleItems(msg)
 	case tickMsg:
 		return a, tea.Batch(a.refresh())
 	case repaintMsg:
@@ -363,6 +428,8 @@ func (a *app) handlePaletteChoice(msg paletteResultMsg) (tea.Model, tea.Cmd) {
 		a.cursor = 0
 		a.filterText = ""
 		return a, a.refresh()
+	case paletteGlobal:
+		return a, a.launchOp(nil, e.op, nil)
 	}
 	return a, nil
 }
@@ -757,13 +824,26 @@ func (a *app) renderBottom(w int) string {
 
 	lw := lipgloss.Width(left)
 	rw := lipgloss.Width(right)
-	version := ""
+	// Combine version + (optional) context into a single centered label so
+	// spacing stays predictable whether Context is set or not.
+	centerLabel := ""
 	if a.opts.Version != "" {
-		version = theme.MutedText.Render(a.opts.Version)
+		centerLabel = theme.MutedText.Render(a.opts.Version)
 	}
-	vw := lipgloss.Width(version)
-	// Center the version in the full width, then pad between it and the
-	// left/right chunks. If the right side overlaps the centered version,
+	if a.opts.Context != nil {
+		if ctx := a.opts.Context(); ctx != "" {
+			dot := theme.MutedText.Render(" · ")
+			pill := theme.PillActive.Render(ctx)
+			if centerLabel != "" {
+				centerLabel = centerLabel + dot + pill
+			} else {
+				centerLabel = pill
+			}
+		}
+	}
+	vw := lipgloss.Width(centerLabel)
+	// Center the label in the full width, then pad between it and the
+	// left/right chunks. If the right side overlaps the centered label,
 	// fall back to left-of-right placement.
 	leftFill := (w-vw)/2 - lw
 	rightFill := w - lw - leftFill - vw - rw
@@ -774,7 +854,7 @@ func (a *app) renderBottom(w int) string {
 			rightFill = 1
 		}
 	}
-	return lipgloss.NewStyle().Width(w).Render(left + strings.Repeat(" ", leftFill) + version + strings.Repeat(" ", rightFill) + right)
+	return lipgloss.NewStyle().Width(w).Render(left + strings.Repeat(" ", leftFill) + centerLabel + strings.Repeat(" ", rightFill) + right)
 }
 
 // dismissSagaMsg clears the saga overlay after the auto-dismiss timer fires.

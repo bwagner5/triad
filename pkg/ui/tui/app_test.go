@@ -162,3 +162,61 @@ func TestTerminalTooSmallRendersEmpty(t *testing.T) {
 		t.Errorf("expected empty view for tiny terminal, got %q", v.Content)
 	}
 }
+
+// streamingStore emits two batches, then closes.
+type streamingStore struct{}
+
+func (streamingStore) Get(_ context.Context, _ string) (any, error) { return nil, nil }
+func (streamingStore) List(_ context.Context, _ registry.Filter) ([]any, error) {
+	return nil, nil
+}
+func (streamingStore) StreamList(_ context.Context, _ registry.Filter) <-chan registry.Batch {
+	ch := make(chan registry.Batch, 3)
+	ch <- registry.Batch{Items: []any{"a", "b"}}
+	ch <- registry.Batch{Items: []any{"c"}}
+	close(ch)
+	return ch
+}
+
+func TestStreamStoreAppends(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{Name: "s", Plural: "ss", Store: streamingStore{}})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	// Kick off a refresh and pump itemsMsgs until we see final.
+	cmd := a.refresh()
+	for i := 0; i < 10 && cmd != nil; i++ {
+		msg := cmd()
+		im, ok := msg.(itemsMsg)
+		if !ok {
+			break
+		}
+		var c tea.Cmd
+		m, c = m.Update(im)
+		cmd = c
+		if im.final {
+			break
+		}
+	}
+	if got := len(m.(*app).items); got != 3 {
+		t.Errorf("streamed items = %d, want 3", got)
+	}
+}
+
+func TestContextDisplayedInFooter(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{Name: "thing", Plural: "things", Store: fakeStore{}})
+	a := newApp(context.Background(), reg, Options{
+		Name:    "test",
+		Context: func() string { return "us-east-2" },
+	})
+	a.resource = ptr(reg.All()[0])
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	plain := stripANSI(m.(*app).View().Content)
+	if !strings.Contains(plain, "us-east-2") {
+		t.Errorf("context label not in view:\n%s", plain)
+	}
+}

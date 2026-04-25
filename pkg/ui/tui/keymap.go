@@ -87,6 +87,20 @@ func (a *app) keyMap() []binding {
 	}})
 
 	// ---- Global ----
+	// Caller-supplied cross-cutting ops (region switch, etc.) come before
+	// the built-in global keys so they're surfaced prominently.
+	for i := range a.opts.GlobalOps {
+		op := a.opts.GlobalOps[i] // capture by copy
+		if op.Key == "" {
+			continue
+		}
+		bs = append(bs, binding{
+			Key: op.Key, Label: op.Name, Cat: "Global",
+			Run: func(a *app) (tea.Model, tea.Cmd) {
+				return a, a.launchOp(nil, &op, nil)
+			},
+		})
+	}
 	bs = append(bs,
 		binding{Key: "/", Label: "filter", Cat: "Global", Run: func(a *app) (tea.Model, tea.Cmd) {
 			a.filtering = true

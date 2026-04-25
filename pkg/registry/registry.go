@@ -72,6 +72,34 @@ type Store interface {
 	List(ctx context.Context, f Filter) ([]any, error)
 }
 
+// StreamStore is an optional extension: stores whose List fans out across
+// slow backends (multi-region APIs, paged catalogs) can implement StreamList
+// to push incremental batches to the UI instead of blocking for the full set.
+//
+// Contract:
+//   - The returned channel is closed by the store when streaming completes.
+//   - Each Batch carries a partial set of items (append-only from the UI's
+//     perspective; the UI concatenates until the channel closes).
+//   - The store MUST respect ctx cancellation: when ctx is Done, stop work
+//     and close the channel promptly.
+//   - Errors are delivered as a Batch with Err set; it's legal to emit
+//     items AND an error in the same stream (e.g. "region eu-west-1 failed
+//     but us-east-1 produced results"). The UI displays errors as toasts.
+//
+// Stores that implement StreamStore should still implement List so the
+// non-streaming CLI path keeps working — a trivial List can drain its own
+// StreamList into a slice.
+type StreamStore interface {
+	Store
+	StreamList(ctx context.Context, f Filter) <-chan Batch
+}
+
+// Batch is one increment in a StreamStore's output.
+type Batch struct {
+	Items []any
+	Err   error // non-nil = best-effort partial failure (e.g. one region); UI shows as toast
+}
+
 // State is passed between saga steps. Input is the user's parsed input;
 // Data is a scratchpad steps can write to (e.g. a created ID for later steps).
 type State struct {
