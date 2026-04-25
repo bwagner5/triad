@@ -240,6 +240,10 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 		wo.pickers[wo.idx] = &newFp
 		if didSelect, path := newFp.DidSelectFile(msg); didSelect {
 			wo.pickers[wo.idx].Path = path
+			// Auto-submit on select: the user pressed enter on a file,
+			// we got the commit, advance the wizard. If other required
+			// fields are still empty, submit() will focus the first one.
+			return true, tea.Batch(cmd, wo.submit())
 		}
 		return true, cmd
 	}
@@ -271,7 +275,8 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 }
 
 // fileKey handles keys that must act on the overlay even when a filepicker
-// is focused (tab/shift-tab/esc). Returns consumed=true when we handled it.
+// is focused (tab/shift-tab/esc, and enter-to-submit once a file has
+// been selected). Returns consumed=true when we handled it.
 func (wo *wizardOverlay) fileKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
@@ -288,6 +293,15 @@ func (wo *wizardOverlay) fileKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 			return true, wo.focusField(wo.idx - 1)
 		}
 		return true, nil
+	case "enter":
+		// Enter is overloaded: the filepicker uses it to open a directory
+		// OR select a file. Only one of those is "submit the wizard".
+		// If the picker already has a Path committed, treat enter as
+		// submit; otherwise let the picker handle it.
+		if wo.pickers[wo.idx] != nil && wo.pickers[wo.idx].Path != "" {
+			return true, wo.submit()
+		}
+		return false, nil
 	}
 	return false, nil
 }
