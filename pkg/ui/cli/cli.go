@@ -45,9 +45,11 @@ type Globals struct {
 	Output         string // short | wide | yaml | json
 	NonInteractive bool   // true: never prompt, append-only log; false (default): prompt + live view
 	Verbose        bool
-	// Debug, when non-empty, enables trace logging to that file path.
-	// Triad components call trace.Log(...) which is a no-op when disabled.
-	Debug string
+	// Debug enables trace logging. DebugFile overrides the default log
+	// path (<cliName>-trace.log in cwd). Triad components call
+	// trace.Log(...) which is a no-op when disabled.
+	Debug     bool
+	DebugFile string
 	// Prompter overrides the interactive input collector. Nil means use the
 	// default wizard-based prompter. Set in tests to a stub.
 	Prompter Prompter
@@ -75,11 +77,13 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 	outDefault := envOr(rootUse, "output", "short")
 	noIntDefault := envBool(rootUse, "no-interactive", false)
 	verboseDefault := envBool(rootUse, "verbose", false)
-	debugDefault := envOr(rootUse, "debug", "")
+	debugDefault := envBool(rootUse, "debug", false)
+	debugFileDefault := envOr(rootUse, "debug-file", rootUse+"-trace.log")
 	root.PersistentFlags().StringVarP(&g.Output, "output", "o", outDefault, envHelp(rootUse, "output", "output: short|wide|yaml|json"))
 	root.PersistentFlags().BoolVarP(&g.NonInteractive, "no-interactive", "y", noIntDefault, envHelp(rootUse, "no-interactive", "disable interactive prompts and live progress (for CI / scripts)"))
 	root.PersistentFlags().BoolVar(&g.Verbose, "verbose", verboseDefault, envHelp(rootUse, "verbose", "verbose output"))
-	root.PersistentFlags().StringVar(&g.Debug, "debug", debugDefault, envHelp(rootUse, "debug", "write trace log to this file path (empty = off)"))
+	root.PersistentFlags().BoolVar(&g.Debug, "debug", debugDefault, envHelp(rootUse, "debug", "enable trace logging"))
+	root.PersistentFlags().StringVar(&g.DebugFile, "debug-file", debugFileDefault, envHelp(rootUse, "debug-file", "trace log path (when --debug is set)"))
 
 	// Enable trace logging as soon as flags are parsed, so every subcommand
 	// Run sees an active trace writer. PersistentPreRunE wraps any existing
@@ -91,10 +95,15 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 				return err
 			}
 		}
-		if g.Debug != "" {
-			if _, err := trace.Enable(g.Debug); err != nil {
+		if g.Debug {
+			path := g.DebugFile
+			if path == "" {
+				path = rootUse + "-trace.log"
+			}
+			if _, err := trace.Enable(path); err != nil {
 				return fmt.Errorf("--debug: %w", err)
 			}
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "trace log: %s\n", path)
 		}
 		return nil
 	}

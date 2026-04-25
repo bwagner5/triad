@@ -18,12 +18,14 @@ var (
 	file    atomic.Pointer[os.File]
 )
 
-// Enable opens path for appending and routes all subsequent Log calls there.
+// Enable opens path fresh (O_TRUNC) and routes all subsequent Log calls
+// there. Truncation matches typical trace-file UX: each run starts clean
+// so `tail -f <path>` while running shows only the current session.
 // Safe to call multiple times; each call replaces the previous destination.
 // Returns the opened file so callers can Close it at shutdown.
 func Enable(path string) (io.Closer, error) {
 	// #nosec G304 -- debug log path comes from an operator-controlled flag.
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, err
 	}
