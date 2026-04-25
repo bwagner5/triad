@@ -94,7 +94,11 @@ type app struct {
 	nextRefresh time.Time
 	refreshing  bool
 	initialLoad bool
-	spin        spinner.Model
+	// streamGen monotonically increments on each refresh(). Inbound
+	// itemsMsgs tagged with an older gen are ignored — prevents dup
+	// items when a new refresh begins before the previous stream drains.
+	streamGen int
+	spin      spinner.Model
 
 	// Toast flash messages (top of screen).
 	toast *toast
@@ -151,6 +155,7 @@ type itemsMsg struct {
 	streamed bool                  // true when this is a partial batch from StreamList (append, don't replace)
 	final    bool                  // true when streaming is complete
 	next     <-chan registry.Batch // when non-nil, caller should read another batch from it
+	gen      int                   // stream generation; handleItems drops stale msgs
 }
 type sagaEventMsg runtime.Event
 
@@ -170,35 +175,37 @@ func (a *app) refresh() tea.Cmd {
 		return nil
 	}
 	a.refreshing = true
+	a.streamGen++
+	gen := a.streamGen
 	res := a.resource
 	// If the Store is streaming-capable, consume its channel and emit one
 	// itemsMsg per batch so the UI can render progressively. Otherwise
 	// fall back to the blocking List.
 	if ss, ok := res.Store.(registry.StreamStore); ok {
-		trace.Log("tui.refresh.stream", "resource", res.Name)
+		trace.Log("tui.refresh.stream", "resource", res.Name, "gen", gen)
 		// Reset items so the first batch replaces, not appends to, the
 		// previous refresh cycle's results.
 		a.items = a.items[:0]
 		ch := ss.StreamList(a.ctx, registry.Filter{})
-		return a.readStream(res.Name, ch)
+		return a.readStream(res.Name, ch, gen)
 	}
-	trace.Log("tui.refresh.list", "resource", res.Name)
+	trace.Log("tui.refresh.list", "resource", res.Name, "gen", gen)
 	return func() tea.Msg {
 		items, err := res.Store.List(a.ctx, registry.Filter{})
-		return itemsMsg{resource: res.Name, items: items, err: err, final: true}
+		return itemsMsg{resource: res.Name, items: items, err: err, final: true, gen: gen}
 	}
 }
 
 // readStream reads one batch off ch and posts it as an itemsMsg.
-func (a *app) readStream(name string, ch <-chan registry.Batch) tea.Cmd {
+func (a *app) readStream(name string, ch <-chan registry.Batch, gen int) tea.Cmd {
 	return func() tea.Msg {
 		b, ok := <-ch
 		if !ok {
-			trace.Log("tui.stream.final", "resource", name)
-			return itemsMsg{resource: name, streamed: true, final: true}
+			trace.Log("tui.stream.final", "resource", name, "gen", gen)
+			return itemsMsg{resource: name, streamed: true, final: true, gen: gen}
 		}
-		trace.Log("tui.stream.batch", "resource", name, "items", len(b.Items), "err", b.Err)
-		return itemsMsg{resource: name, items: b.Items, err: b.Err, streamed: true, next: ch}
+		trace.Log("tui.stream.batch", "resource", name, "items", len(b.Items), "err", b.Err, "gen", gen)
+		return itemsMsg{resource: name, items: b.Items, err: b.Err, streamed: true, next: ch, gen: gen}
 	}
 }
 
@@ -206,6 +213,13 @@ func (a *app) readStream(name string, ch <-chan registry.Batch) tea.Cmd {
 // out of Update to keep gocyclo happy.
 func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 	if a.resource == nil || msg.resource != a.resource.Name {
+		return a, nil
+	}
+	// Drop stale messages from a prior refresh cycle — otherwise a batch
+	// in flight when refresh() is called again would append to the fresh
+	// list and produce duplicates.
+	if msg.gen != a.streamGen {
+		trace.Log("tui.items.stale", "gen", msg.gen, "current", a.streamGen)
 		return a, nil
 	}
 	if !msg.streamed {
@@ -223,7 +237,7 @@ func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		cmds := []tea.Cmd{a.showToast(toastErr, msg.err.Error())}
 		if msg.next != nil {
-			cmds = append(cmds, a.readStream(msg.resource, msg.next))
+			cmds = append(cmds, a.readStream(msg.resource, msg.next, msg.gen))
 		}
 		return a, tea.Batch(cmds...)
 	}
@@ -238,7 +252,7 @@ func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 		return a, a.scheduleRefresh()
 	}
 	if msg.next != nil {
-		return a, a.readStream(msg.resource, msg.next)
+		return a, a.readStream(msg.resource, msg.next, msg.gen)
 	}
 	return a, nil
 }

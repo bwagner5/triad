@@ -444,7 +444,7 @@ func (wo *wizardOverlay) renderFile(fieldIdx int, focused bool) string {
 	}
 	// Render the filepicker body indented. The picker handles its own
 	// window of files — limit visible height in Show().
-	inner := "\n" + strings.ReplaceAll(fp.View(), "\n", "\n  ") + "\n"
+	inner := "\n  " + strings.ReplaceAll(fp.View(), "\n", "\n  ") + "\n"
 	if !focused {
 		// When not focused, collapse to just the selected path.
 		inner = "\n"
