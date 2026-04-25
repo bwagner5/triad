@@ -20,19 +20,23 @@ func TestFlagToEnvVar(t *testing.T) {
 }
 
 func TestEnvOrBool(t *testing.T) {
-	t.Setenv("FOO_SET", "bar")
-	if v := envOr("foo", "set", "default"); v != "bar" {
+	env := map[string]string{
+		"FOO_SET":  "bar",
+		"FOO_FLAG": "true",
+	}
+	getenv := func(k string) string { return env[k] }
+
+	if v := envOr(getenv, "foo", "set", "default"); v != "bar" {
 		t.Errorf("envOr set = %q", v)
 	}
-	if v := envOr("foo", "unset", "default"); v != "default" {
+	if v := envOr(getenv, "foo", "unset", "default"); v != "default" {
 		t.Errorf("envOr unset = %q", v)
 	}
-	t.Setenv("FOO_FLAG", "true")
-	if !envBool("foo", "flag", false) {
+	if !envBool(getenv, "foo", "flag", false) {
 		t.Errorf("envBool true failed")
 	}
-	t.Setenv("FOO_FLAG", "nope")
-	if envBool("foo", "flag", true) {
+	env["FOO_FLAG"] = "nope"
+	if envBool(getenv, "foo", "flag", true) {
 		t.Errorf("envBool non-truthy should be false, not fallback")
 	}
 }

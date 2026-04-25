@@ -53,9 +53,23 @@ type Globals struct {
 	// Prompter overrides the interactive input collector. Nil means use the
 	// default wizard-based prompter. Set in tests to a stub.
 	Prompter Prompter
+	// Getenv lets callers inject env-var resolution (Ryer's run-func
+	// pattern). Defaults to os.Getenv if nil. Set in tests to return a
+	// canned map so cases can run in parallel.
+	Getenv func(string) string
 	// cliName is the root command name; used to derive env-var fallbacks
 	// for every flag (e.g. LIGHTSAILCTL_REGION). Populated by Build().
 	cliName string
+}
+
+// getenv returns g.Getenv if set, else os.Getenv as a last-resort fallback.
+// Called by env-default helpers; keeps the package testable without
+// global state.
+func (g *Globals) getenv(key string) string {
+	if g.Getenv != nil {
+		return g.Getenv(key)
+	}
+	return os.Getenv(key)
 }
 
 // Interactive returns true when the CLI should prompt for missing inputs
@@ -74,11 +88,12 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 	root.SetVersionTemplate("{{.Version}}\n")
 
 	// Every persistent flag honors <CLINAME>_<FLAG> as an env-var fallback.
-	outDefault := envOr(rootUse, "output", "short")
-	noIntDefault := envBool(rootUse, "no-interactive", false)
-	verboseDefault := envBool(rootUse, "verbose", false)
-	debugDefault := envBool(rootUse, "debug", false)
-	debugFileDefault := envOr(rootUse, "debug-file", rootUse+"-trace.log")
+	ge := g.getenv
+	outDefault := envOr(ge, rootUse, "output", "short")
+	noIntDefault := envBool(ge, rootUse, "no-interactive", false)
+	verboseDefault := envBool(ge, rootUse, "verbose", false)
+	debugDefault := envBool(ge, rootUse, "debug", false)
+	debugFileDefault := envOr(ge, rootUse, "debug-file", rootUse+"-trace.log")
 	root.PersistentFlags().StringVarP(&g.Output, "output", "o", outDefault, envHelp(rootUse, "output", "output: short|wide|yaml|json"))
 	root.PersistentFlags().BoolVarP(&g.NonInteractive, "no-interactive", "y", noIntDefault, envHelp(rootUse, "no-interactive", "disable interactive prompts and live progress (for CI / scripts)"))
 	root.PersistentFlags().BoolVar(&g.Verbose, "verbose", verboseDefault, envHelp(rootUse, "verbose", "verbose output"))
@@ -203,7 +218,7 @@ func sagaCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 			return streamOp(cmd.Context(), cmd.OutOrStdout(), res, op, in, g.Interactive())
 		},
 	}
-	bindFields(c, op.Fields, in)
+	bindFields(c, op.Fields, in, g)
 	return c
 }
 
@@ -220,12 +235,12 @@ func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 			return op.Run(cmd.Context(), in)
 		},
 	}
-	bindFields(c, op.Fields, in)
+	bindFields(c, op.Fields, in, g)
 	return c
 }
 
 // bindFields wires registry.Field -> cobra flags that write into the Input map.
-func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input) {
+func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input, g *Globals) {
 	cliName := rootName(c)
 	// Storage for each flag's string value. We keep them in a slice so
 	// each closure captures its own pointer.
@@ -236,7 +251,7 @@ func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input) {
 			v = fmt.Sprintf("%v", f.Default)
 		}
 		// <CLINAME>_<FLAG> env var overrides the static Default.
-		if env := os.Getenv(FlagToEnvVar(cliName, f.Flag)); env != "" {
+		if env := g.getenv(FlagToEnvVar(cliName, f.Flag)); env != "" {
 			v = env
 		}
 		if v != "" {
@@ -273,17 +288,17 @@ func rootName(c *cobra.Command) string {
 	return c.Use
 }
 
-// envOr returns the value of <CLINAME>_<FLAG> if set, else fallback.
-func envOr(cliName, flag, fallback string) string {
-	if v := os.Getenv(FlagToEnvVar(cliName, flag)); v != "" {
+// envOr returns the value of <CLINAME>_<FLAG> if set in getenv, else fallback.
+func envOr(getenv func(string) string, cliName, flag, fallback string) string {
+	if v := getenv(FlagToEnvVar(cliName, flag)); v != "" {
 		return v
 	}
 	return fallback
 }
 
 // envBool reads <CLINAME>_<FLAG> as a bool (1/true/yes). Falls back to def.
-func envBool(cliName, flag string, def bool) bool {
-	v := os.Getenv(FlagToEnvVar(cliName, flag))
+func envBool(getenv func(string) string, cliName, flag string, def bool) bool {
+	v := getenv(FlagToEnvVar(cliName, flag))
 	if v == "" {
 		return def
 	}
