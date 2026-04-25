@@ -100,6 +100,14 @@ func (m *model) startField() tea.Cmd {
 	// Text input mode.
 	m.loading = false
 	m.ti.Placeholder = f.Help
+	// Seed with the field's lazy Prefill so the user can press Enter to
+	// accept a sensible default (e.g. the current git repo name) or type
+	// to override.
+	if f.Prefill != nil {
+		if v := f.Prefill(); v != "" {
+			m.ti.SetValue(v)
+		}
+	}
 	if f.Sensitive {
 		m.ti.EchoMode = textinput.EchoPassword
 	} else {

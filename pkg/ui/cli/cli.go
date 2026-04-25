@@ -82,7 +82,8 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 	root := &cobra.Command{
 		Use:          rootUse,
 		Short:        short,
-		SilenceUsage: true,
+		SilenceUsage:  true,
+		SilenceErrors: true, // render errors ourselves; cobra would otherwise
 	}
 	root.SetErrPrefix(theme.Err.Render("error:"))
 	root.SetVersionTemplate("{{.Version}}\n")

@@ -170,8 +170,14 @@ func TestCLIAliasesBehaveIdentically(t *testing.T) {
 }
 
 func TestCLITypoSuggestion(t *testing.T) {
-	out, _ := execCmd(t, "widgetz")
-	if !strings.Contains(out, "widget") {
-		t.Errorf("expected suggestion mentioning 'widget':\n%s", out)
+	out, err := execCmd(t, "widgetz")
+	// Unknown command errors surface via the returned err now that
+	// SilenceErrors is true; the message should still suggest 'widget'.
+	combined := out
+	if err != nil {
+		combined += "\n" + err.Error()
+	}
+	if !strings.Contains(combined, "widget") {
+		t.Errorf("expected suggestion mentioning 'widget':\nstdout+err:\n%s", combined)
 	}
 }

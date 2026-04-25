@@ -35,12 +35,21 @@ type TableHint struct {
 
 // Field describes a single input / column of a resource.
 type Field struct {
-	Name      string // struct field path (informational)
-	Flag      string // e.g. "name"
-	Short     string // e.g. "n"
-	Help      string
-	Required  bool
-	Default   any
+	Name     string // struct field path (informational)
+	Flag     string // e.g. "name"
+	Short    string // e.g. "n"
+	Help     string
+	Required bool
+	// Default sets a static pre-filled value. It satisfies Required (so
+	// the wizard won't prompt). Use for settings like "env defaults to
+	// dev" where prompting would be noise.
+	Default any
+	// Prefill is a lazy hint evaluated when the wizard runs. Unlike
+	// Default it does NOT satisfy Required — the wizard still opens and
+	// seeds its text input with the returned value so the user can press
+	// Enter to accept or type to override. Use for "suggest the git repo
+	// name but let the user change it" UX.
+	Prefill   func() string
 	Sensitive bool
 	Table     TableHint
 	// Validate is called on the raw string form after parsing.

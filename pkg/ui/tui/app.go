@@ -109,6 +109,9 @@ type app struct {
 	// wizard is collecting the missing fields. The next wizardDoneMsg
 	// feeds the answers back to the runtime via this callback.
 	sagaProvide func(registry.Input)
+	// sagaCh holds the current saga's event channel so handleSagaEvent
+	// can keep draining it via readSagaCmd after each event.
+	sagaCh <-chan runtime.Event
 
 	showPalette bool
 	showHelp    bool
@@ -291,6 +294,7 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.refresh()
 	case dismissSagaMsg:
 		a.saga.Clear()
+		a.sagaCh = nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		a.spin, cmd = a.spin.Update(msg)
@@ -477,20 +481,29 @@ func (a *app) handlePaletteChoice(msg paletteResultMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
+	// Always keep draining the saga channel so the runtime goroutine
+	// isn't blocked on a full buffer. subscribeBus covers cross-component
+	// signaling (refresh-on-done); readSagaCmd covers the per-step flow.
+	drain := func() tea.Cmd {
+		if a.sagaCh != nil {
+			return readSagaCmd(a.sagaCh)
+		}
+		return a.subscribeBus()
+	}
+
 	if ev.Status == runtime.NeedsInput && ev.Needs != nil && ev.Provide != nil {
-		// Pause the saga: stash Provide, open the wizard overlay, keep
-		// reading further saga events (in case ctx cancels from outside).
 		trace.Log("tui.saga.needsInput", "step", ev.Step, "fields", len(ev.Needs.Fields))
 		a.sagaProvide = ev.Provide
 		input := registry.Input{}
 		return a, tea.Batch(
 			a.wizard.Show(a.ctx, nil, sagaNeedOp(ev.Needs), ev.Needs.Fields, input),
-			a.subscribeBus(),
+			drain(),
 		)
 	}
 	a.saga.Push(ev)
 	if ev.Done {
 		a.sched.Bump(ev.Resource)
+		a.sagaCh = nil
 		var toastCmd tea.Cmd
 		if ev.Err != nil {
 			toastCmd = a.showToast(toastErr, fmt.Sprintf("%s failed: %s", ev.Saga, ev.Err.Error()))
@@ -499,7 +512,7 @@ func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
 		}
 		return a, tea.Batch(a.saga.DismissAfter(), a.refresh(), a.subscribeBus(), toastCmd)
 	}
-	return a, a.subscribeBus()
+	return a, drain()
 }
 
 // sagaNeedOp is a synthetic Operation just so the wizard overlay has a

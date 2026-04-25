@@ -64,6 +64,14 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *r
 		if f.Sensitive {
 			ti.EchoMode = textinput.EchoPassword
 		}
+		// Seed text inputs with the field's lazy Prefill so the user can
+		// press Enter to accept a sensible default (git repo name, cwd,
+		// etc.) without making it count as Required-satisfied.
+		if f.Prefill != nil && f.Suggest == nil {
+			if v := f.Prefill(); v != "" {
+				ti.SetValue(v)
+			}
+		}
 		wo.inputs[i] = ti
 
 		if f.Suggest != nil {

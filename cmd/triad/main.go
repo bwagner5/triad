@@ -31,7 +31,6 @@ const cliName = "triad"
 func main() {
 	ctx := context.Background()
 	if err := Run(ctx, os.Args, os.Getenv, os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
