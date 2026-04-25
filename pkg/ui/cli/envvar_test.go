@@ -1,0 +1,38 @@
+package cli
+
+import "testing"
+
+func TestFlagToEnvVar(t *testing.T) {
+	cases := []struct {
+		cli, flag, want string
+	}{
+		{"lightsailctl", "region", "LIGHTSAILCTL_REGION"},
+		{"lightsailctl", "wait-timeout", "LIGHTSAILCTL_WAIT_TIMEOUT"},
+		{"my-app", "no-interactive", "MY_APP_NO_INTERACTIVE"},
+		{"triad", "output", "TRIAD_OUTPUT"},
+		{"foo.bar", "a/b", "FOO_BAR_A_B"},
+	}
+	for _, c := range cases {
+		if got := FlagToEnvVar(c.cli, c.flag); got != c.want {
+			t.Errorf("FlagToEnvVar(%q,%q) = %q; want %q", c.cli, c.flag, got, c.want)
+		}
+	}
+}
+
+func TestEnvOrBool(t *testing.T) {
+	t.Setenv("FOO_SET", "bar")
+	if v := envOr("foo", "set", "default"); v != "bar" {
+		t.Errorf("envOr set = %q", v)
+	}
+	if v := envOr("foo", "unset", "default"); v != "default" {
+		t.Errorf("envOr unset = %q", v)
+	}
+	t.Setenv("FOO_FLAG", "true")
+	if !envBool("foo", "flag", false) {
+		t.Errorf("envBool true failed")
+	}
+	t.Setenv("FOO_FLAG", "nope")
+	if envBool("foo", "flag", true) {
+		t.Errorf("envBool non-truthy should be false, not fallback")
+	}
+}

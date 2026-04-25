@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/runtime"
@@ -46,6 +47,9 @@ type Globals struct {
 	// Prompter overrides the interactive input collector. Nil means use the
 	// default wizard-based prompter. Set in tests to a stub.
 	Prompter Prompter
+	// cliName is the root command name; used to derive env-var fallbacks
+	// for every flag (e.g. LIGHTSAILCTL_REGION). Populated by Build().
+	cliName string
 }
 
 // Interactive returns true when the CLI should prompt for missing inputs
@@ -54,6 +58,7 @@ func (g *Globals) Interactive() bool { return !g.NonInteractive }
 
 // Build constructs the cobra root for the given registry.
 func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Command {
+	g.cliName = rootUse
 	root := &cobra.Command{
 		Use:          rootUse,
 		Short:        short,
@@ -61,9 +66,14 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 	}
 	root.SetErrPrefix(theme.Err.Render("error:"))
 	root.SetVersionTemplate("{{.Version}}\n")
-	root.PersistentFlags().StringVarP(&g.Output, "output", "o", "short", "output: short|wide|yaml|json")
-	root.PersistentFlags().BoolVarP(&g.NonInteractive, "no-interactive", "y", false, "disable interactive prompts and live progress (for CI / scripts)")
-	root.PersistentFlags().BoolVar(&g.Verbose, "verbose", false, "verbose output")
+
+	// Every persistent flag honors <CLINAME>_<FLAG> as an env-var fallback.
+	outDefault := envOr(rootUse, "output", "short")
+	noIntDefault := envBool(rootUse, "no-interactive", false)
+	verboseDefault := envBool(rootUse, "verbose", false)
+	root.PersistentFlags().StringVarP(&g.Output, "output", "o", outDefault, envHelp(rootUse, "output", "output: short|wide|yaml|json"))
+	root.PersistentFlags().BoolVarP(&g.NonInteractive, "no-interactive", "y", noIntDefault, envHelp(rootUse, "no-interactive", "disable interactive prompts and live progress (for CI / scripts)"))
+	root.PersistentFlags().BoolVar(&g.Verbose, "verbose", verboseDefault, envHelp(rootUse, "verbose", "verbose output"))
 
 	InstallHelp(root)
 	root.SuggestionsMinimumDistance = 2
@@ -183,6 +193,7 @@ func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 
 // bindFields wires registry.Field -> cobra flags that write into the Input map.
 func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input) {
+	cliName := rootName(c)
 	// Storage for each flag's string value. We keep them in a slice so
 	// each closure captures its own pointer.
 	vals := make([]*string, len(fields))
@@ -190,10 +201,16 @@ func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input) {
 		v := ""
 		if f.Default != nil {
 			v = fmt.Sprintf("%v", f.Default)
+		}
+		// <CLINAME>_<FLAG> env var overrides the static Default.
+		if env := os.Getenv(FlagToEnvVar(cliName, f.Flag)); env != "" {
+			v = env
+		}
+		if v != "" {
 			in[f.Flag] = v
 		}
 		vals[i] = &v
-		c.Flags().StringVarP(vals[i], f.Flag, f.Short, v, f.Help)
+		c.Flags().StringVarP(vals[i], f.Flag, f.Short, v, envHelp(cliName, f.Flag, f.Help))
 	}
 	// After parsing, copy non-empty flag values into Input.
 	prev := c.PreRunE
@@ -211,6 +228,46 @@ func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input) {
 		}
 		return nil
 	}
+}
+
+// rootName walks up to the root cobra command and returns its Use field —
+// the CLI name passed to Build(). Used to derive env-var names for flags
+// bound below the root.
+func rootName(c *cobra.Command) string {
+	for c.HasParent() {
+		c = c.Parent()
+	}
+	return c.Use
+}
+
+// envOr returns the value of <CLINAME>_<FLAG> if set, else fallback.
+func envOr(cliName, flag, fallback string) string {
+	if v := os.Getenv(FlagToEnvVar(cliName, flag)); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// envBool reads <CLINAME>_<FLAG> as a bool (1/true/yes). Falls back to def.
+func envBool(cliName, flag string, def bool) bool {
+	v := os.Getenv(FlagToEnvVar(cliName, flag))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "1", "true", "TRUE", "True", "yes", "YES":
+		return true
+	}
+	return false
+}
+
+// envHelp appends the expected env var name to a flag's help text.
+func envHelp(cliName, flag, help string) string {
+	env := FlagToEnvVar(cliName, flag)
+	if help == "" {
+		return "[$" + env + "]"
+	}
+	return help + " [$" + env + "]"
 }
 
 // CompleteInput validates required fields, launching the prompter when missing.
