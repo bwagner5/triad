@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"os"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/filepicker"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	"github.com/bwagner5/triad/pkg/registry"
@@ -23,11 +25,12 @@ type wizardOverlay struct {
 	input    registry.Input
 	idx      int // focused field
 
-	inputs  []textinput.Model // one per field
+	inputs  []textinput.Model   // one per field
+	pickers []*filepicker.Model // one per file-field, nil otherwise
 	spin    spinner.Model
-	loading []bool             // per-field loading state
+	loading []bool              // per-field loading state
 	choices [][]registry.Choice // per-field choices
-	selIdx  []int              // per-field selection cursor
+	selIdx  []int               // per-field selection cursor
 
 	errs []string // per-field validation error
 	w, h int
@@ -51,6 +54,7 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *r
 
 	n := len(fields)
 	wo.inputs = make([]textinput.Model, n)
+	wo.pickers = make([]*filepicker.Model, n)
 	wo.loading = make([]bool, n)
 	wo.choices = make([][]registry.Choice, n)
 	wo.selIdx = make([]int, n)
@@ -58,6 +62,19 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *r
 
 	var cmds []tea.Cmd
 	for i, f := range fields {
+		if f.File {
+			fp := filepicker.New()
+			fp.AllowedTypes = f.AllowedExts
+			fp.ShowHidden = false
+			fp.AutoHeight = false
+			fp.SetHeight(10)
+			if cwd, err := os.Getwd(); err == nil {
+				fp.CurrentDirectory = cwd
+			}
+			wo.pickers[i] = &fp
+			cmds = append(cmds, fp.Init())
+			continue
+		}
 		ti := textinput.New()
 		ti.Prompt = "› "
 		ti.Placeholder = f.Help
@@ -87,12 +104,17 @@ func (wo *wizardOverlay) Clear() {
 	wo.active = false
 	wo.fields = nil
 	wo.inputs = nil
+	wo.pickers = nil
 	wo.choices = nil
 	wo.errs = nil
 }
 
 func (wo *wizardOverlay) isSelect(i int) bool {
 	return i < len(wo.fields) && wo.fields[i].Suggest != nil
+}
+
+func (wo *wizardOverlay) isFile(i int) bool {
+	return i < len(wo.fields) && wo.fields[i].File
 }
 
 type wizardSuggestMsg struct {
@@ -113,9 +135,9 @@ func (wo *wizardOverlay) focusField(i int) tea.Cmd {
 	wo.idx = i
 	var cmds []tea.Cmd
 	for j := range wo.inputs {
-		if j == i && !wo.isSelect(j) {
+		if j == i && !wo.isSelect(j) && !wo.isFile(j) {
 			cmds = append(cmds, wo.inputs[j].Focus())
-		} else {
+		} else if wo.inputs[j].Prompt != "" {
 			wo.inputs[j].Blur()
 		}
 	}
@@ -163,6 +185,9 @@ func (wo *wizardOverlay) fieldValue(i int) string {
 		}
 		return ""
 	}
+	if wo.isFile(i) && wo.pickers[i] != nil {
+		return wo.pickers[i].Path
+	}
 	return wo.inputs[i].Value()
 }
 
@@ -177,6 +202,23 @@ type wizardDoneMsg struct {
 func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 	if !wo.active {
 		return false, nil
+	}
+	// If the focused field is a filepicker, let it handle everything
+	// first — including its own j/k navigation and directory changes.
+	// handleKey below still intercepts tab/shift-tab/enter at submit time.
+	if wo.isFile(wo.idx) && wo.pickers[wo.idx] != nil {
+		if key, ok := msg.(tea.KeyPressMsg); ok {
+			if consumed, cmd := wo.fileKey(key); consumed {
+				return true, cmd
+			}
+		}
+		fp := *wo.pickers[wo.idx]
+		newFp, cmd := fp.Update(msg)
+		wo.pickers[wo.idx] = &newFp
+		if didSelect, path := newFp.DidSelectFile(msg); didSelect {
+			wo.pickers[wo.idx].Path = path // explicit (Update already sets it, be safe)
+		}
+		return true, cmd
 	}
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
@@ -197,12 +239,34 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 		return true, cmd
 	}
 	// Forward to focused text input.
-	if wo.idx < len(wo.inputs) && !wo.isSelect(wo.idx) {
+	if wo.idx < len(wo.inputs) && !wo.isSelect(wo.idx) && !wo.isFile(wo.idx) {
 		var cmd tea.Cmd
 		wo.inputs[wo.idx], cmd = wo.inputs[wo.idx].Update(msg)
 		return true, cmd
 	}
 	return true, nil
+}
+
+// fileKey handles keys that must act on the overlay even when a filepicker
+// is focused (tab/shift-tab/esc). Returns consumed=true when we handled it.
+func (wo *wizardOverlay) fileKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		op, res := wo.op, wo.resource
+		wo.Clear()
+		return true, func() tea.Msg { return wizardDoneMsg{resource: res, op: op, input: nil} }
+	case "tab":
+		if wo.idx < len(wo.fields)-1 {
+			return true, wo.focusField(wo.idx + 1)
+		}
+		return true, nil
+	case "shift+tab":
+		if wo.idx > 0 {
+			return true, wo.focusField(wo.idx - 1)
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
@@ -307,6 +371,8 @@ func (wo *wizardOverlay) Box(w, h int) string {
 			body.WriteString("  " + wo.spin.View() + " " + theme.MutedText.Render("loading…") + "\n")
 		case wo.isSelect(i):
 			body.WriteString(wo.renderChoices(i, focused))
+		case wo.isFile(i):
+			body.WriteString(wo.renderFile(i, focused))
 		default:
 			body.WriteString("  " + wo.inputs[i].View() + "\n")
 		}
@@ -322,6 +388,31 @@ func (wo *wizardOverlay) Box(w, h int) string {
 	body.WriteString("\n" + theme.MutedText.Render("  tab/shift+tab navigate · enter submit · esc cancel"))
 
 	return theme.Border.Width(width).Render(body.String())
+}
+
+func (wo *wizardOverlay) renderFile(fieldIdx int, focused bool) string {
+	fp := wo.pickers[fieldIdx]
+	if fp == nil {
+		return ""
+	}
+	path := fp.Path
+	if path == "" {
+		path = theme.MutedText.Render("(choose a file — j/k ↑/↓ · enter select/open · h back)")
+	} else if focused {
+		path = theme.Value.Render(path)
+	}
+	marker := "  "
+	if focused {
+		marker = "  " + theme.Key.Render("▸ ")
+	}
+	// Render the filepicker body indented. The picker handles its own
+	// window of files — limit visible height in Show().
+	inner := "\n" + strings.ReplaceAll(fp.View(), "\n", "\n  ") + "\n"
+	if !focused {
+		// When not focused, collapse to just the selected path.
+		inner = "\n"
+	}
+	return marker + "selected: " + path + inner
 }
 
 func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool) string {

@@ -49,9 +49,15 @@ type Field struct {
 	// seeds its text input with the returned value so the user can press
 	// Enter to accept or type to override. Use for "suggest the git repo
 	// name but let the user change it" UX.
-	Prefill   func() string
-	Sensitive bool
-	Table     TableHint
+	Prefill func() string
+	// File, when true, renders the field as an interactive filepicker
+	// instead of a text input. The resulting value is the absolute path
+	// of the file the user selected. AllowedExts narrows the selection
+	// to file names with those extensions (including the leading dot).
+	File        bool
+	AllowedExts []string
+	Sensitive   bool
+	Table       TableHint
 	// Validate is called on the raw string form after parsing.
 	Validate func(value string) error
 	// Suggest returns dynamic choices (e.g. from a backend). May block;
