@@ -5,6 +5,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/trace"
 )
 
 // needsSelection returns true when an operation acts on an existing resource
@@ -128,9 +129,11 @@ func (a *app) keyMap() []binding {
 func (a *app) dispatch(key string) (tea.Model, tea.Cmd, bool) {
 	for _, b := range a.keyMap() {
 		if b.Key == key {
+			trace.Log("tui.dispatch", "key", key, "label", b.Label, "cat", b.Cat)
 			m, cmd := b.Run(a)
 			return m, cmd, true
 		}
 	}
+	trace.Log("tui.dispatch.miss", "key", key)
 	return a, nil, false
 }

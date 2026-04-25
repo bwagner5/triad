@@ -17,6 +17,7 @@ import (
 
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/runtime"
+	"github.com/bwagner5/triad/pkg/trace"
 	"github.com/bwagner5/triad/pkg/ui/theme"
 	"github.com/bwagner5/triad/pkg/ui/wizard"
 	"github.com/spf13/cobra"
@@ -44,6 +45,9 @@ type Globals struct {
 	Output         string // short | wide | yaml | json
 	NonInteractive bool   // true: never prompt, append-only log; false (default): prompt + live view
 	Verbose        bool
+	// Debug, when non-empty, enables trace logging to that file path.
+	// Triad components call trace.Log(...) which is a no-op when disabled.
+	Debug string
 	// Prompter overrides the interactive input collector. Nil means use the
 	// default wizard-based prompter. Set in tests to a stub.
 	Prompter Prompter
@@ -71,9 +75,29 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 	outDefault := envOr(rootUse, "output", "short")
 	noIntDefault := envBool(rootUse, "no-interactive", false)
 	verboseDefault := envBool(rootUse, "verbose", false)
+	debugDefault := envOr(rootUse, "debug", "")
 	root.PersistentFlags().StringVarP(&g.Output, "output", "o", outDefault, envHelp(rootUse, "output", "output: short|wide|yaml|json"))
 	root.PersistentFlags().BoolVarP(&g.NonInteractive, "no-interactive", "y", noIntDefault, envHelp(rootUse, "no-interactive", "disable interactive prompts and live progress (for CI / scripts)"))
 	root.PersistentFlags().BoolVar(&g.Verbose, "verbose", verboseDefault, envHelp(rootUse, "verbose", "verbose output"))
+	root.PersistentFlags().StringVar(&g.Debug, "debug", debugDefault, envHelp(rootUse, "debug", "write trace log to this file path (empty = off)"))
+
+	// Enable trace logging as soon as flags are parsed, so every subcommand
+	// Run sees an active trace writer. PersistentPreRunE wraps any existing
+	// one on root so we don't stomp callers that registered their own.
+	prevPreRun := root.PersistentPreRunE
+	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		if prevPreRun != nil {
+			if err := prevPreRun(cmd, args); err != nil {
+				return err
+			}
+		}
+		if g.Debug != "" {
+			if _, err := trace.Enable(g.Debug); err != nil {
+				return fmt.Errorf("--debug: %w", err)
+			}
+		}
+		return nil
+	}
 
 	InstallHelp(root)
 	root.SuggestionsMinimumDistance = 2

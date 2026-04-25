@@ -8,6 +8,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/runtime"
+	"github.com/bwagner5/triad/pkg/trace"
 	"github.com/bwagner5/triad/pkg/ui/wizard"
 )
 
@@ -22,28 +23,61 @@ type startSagaMsg struct {
 // launchOp is the unified entry point for all operations. It routes to the
 // wizard overlay (missing fields), confirm overlay (destructive ops), saga
 // runner (Steps), or tea.Exec (Run).
+//
+// Routing rules:
+//
+//   - Op with Steps: run via saga overlay. Wizard overlay opens first if any
+//     required Fields are missing.
+//   - Op with Run only and no missing Fields that need wizard input (none
+//     Required, or all Required fields are already set via Input): tea.Exec.
+//     This releases the tty for streaming output (logs, exec).
+//   - Op with Run AND missing wizard-driven inputs: collect via the TUI
+//     wizard overlay first, then invoke Run in-process (no tty release).
+//     This is how GlobalOps that pick a value end up working — a region
+//     switcher doesn't need the terminal, it just needs the picker.
 func (a *app) launchOp(res *registry.Resource, op *registry.Operation, input registry.Input) tea.Cmd {
 	if input == nil {
 		input = registry.Input{}
 	}
 	missing := missingRequired(op.Fields, input)
+	resName := ""
+	if res != nil {
+		resName = res.Name
+	}
+	trace.Log("tui.launchOp",
+		"resource", resName, "op", op.Name,
+		"hasSteps", len(op.Steps) > 0, "hasRun", op.Run != nil,
+		"fields", len(op.Fields), "missing", len(missing),
+		"confirm", op.Confirm != "", "global", res == nil,
+	)
 
-	// Simple action (Run, no Steps): collect missing fields via tea.Exec wizard, then run.
+	// Run op with missing inputs → wizard overlay, then run in-process.
+	if op.Run != nil && len(op.Steps) == 0 && len(missing) > 0 {
+		trace.Log("tui.launchOp.route", "kind", "wizard-then-run")
+		return a.wizard.Show(a.ctx, res, op, missing, input)
+	}
+
+	// Run op with nothing to prompt for → full tty via tea.Exec.
 	if op.Run != nil && len(op.Steps) == 0 {
-		cmd := &actionExec{ctx: a.ctx, missing: missing, input: input, op: op}
+		trace.Log("tui.launchOp.route", "kind", "tea.Exec")
+		cmd := &actionExec{ctx: a.ctx, missing: nil, input: input, op: op}
 		return tea.Exec(cmd, func(err error) tea.Msg {
+			trace.Log("tui.launchOp.actionDone", "op", op.Name, "err", err)
 			return actionDoneMsg{err: err}
 		})
 	}
 
-	// Multi-step operation: use TUI overlays.
+	// Saga path: wizard overlay (if needed) → confirm (if set) → saga.
 	if len(missing) > 0 {
+		trace.Log("tui.launchOp.route", "kind", "wizard-overlay")
 		return a.wizard.Show(a.ctx, res, op, missing, input)
 	}
 	if op.Confirm != "" {
+		trace.Log("tui.launchOp.route", "kind", "confirm-overlay")
 		a.confirm.Show(op.Confirm, res, op, input)
 		return nil
 	}
+	trace.Log("tui.launchOp.route", "kind", "saga")
 	return func() tea.Msg {
 		return startSagaMsg{resource: res, op: op, input: input}
 	}
@@ -54,12 +88,14 @@ func (a *app) launchOp(res *registry.Resource, op *registry.Operation, input reg
 // events just carry an empty resource name.
 func (a *app) startSaga(msg startSagaMsg) tea.Cmd {
 	if msg.err != nil || msg.op == nil {
+		trace.Log("tui.startSaga.abort", "err", msg.err, "opNil", msg.op == nil)
 		return nil
 	}
 	var res registry.Resource
 	if msg.resource != nil {
 		res = *msg.resource
 	}
+	trace.Log("tui.startSaga", "op", msg.op.Name, "resource", res.Name, "steps", len(msg.op.Steps))
 	ch := runtime.Run(a.ctx, a.bus, res, *msg.op, msg.input)
 	a.saga.Start(msg.op.Name)
 	return readSagaCmd(ch)
@@ -109,12 +145,16 @@ type actionExec struct {
 }
 
 func (e *actionExec) Run() error {
+	trace.Log("tui.actionExec.Run", "op", e.op.Name, "missing", len(e.missing))
 	if len(e.missing) > 0 {
 		if err := wizard.Collect(e.ctx, e.missing, e.input); err != nil {
+			trace.Log("tui.actionExec.wizardErr", "err", err)
 			return err
 		}
 	}
-	return e.op.Run(e.ctx, e.input)
+	err := e.op.Run(e.ctx, e.input)
+	trace.Log("tui.actionExec.done", "op", e.op.Name, "err", err)
+	return err
 }
 func (e *actionExec) SetStdin(r io.Reader)  { e.stdin = r }
 func (e *actionExec) SetStdout(w io.Writer) { e.stdout = w }

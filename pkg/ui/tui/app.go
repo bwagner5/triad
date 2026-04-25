@@ -25,6 +25,7 @@ import (
 	"github.com/bwagner5/triad/pkg/duration"
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/runtime"
+	"github.com/bwagner5/triad/pkg/trace"
 	"github.com/bwagner5/triad/pkg/ui/ascii"
 	"github.com/bwagner5/triad/pkg/ui/theme"
 )
@@ -55,8 +56,13 @@ type Options struct {
 
 // Run starts the full-screen TUI against the given registry.
 func Run(ctx context.Context, reg *registry.Registry, opts Options) error {
+	trace.Log("tui.Run",
+		"name", opts.Name, "resources", len(reg.All()),
+		"globalOps", len(opts.GlobalOps), "hasContext", opts.Context != nil,
+	)
 	m := newApp(ctx, reg, opts)
 	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
+	trace.Log("tui.Run.exit", "err", err)
 	return err
 }
 
@@ -161,12 +167,14 @@ func (a *app) refresh() tea.Cmd {
 	// itemsMsg per batch so the UI can render progressively. Otherwise
 	// fall back to the blocking List.
 	if ss, ok := res.Store.(registry.StreamStore); ok {
+		trace.Log("tui.refresh.stream", "resource", res.Name)
 		// Reset items so the first batch replaces, not appends to, the
 		// previous refresh cycle's results.
 		a.items = a.items[:0]
 		ch := ss.StreamList(a.ctx, registry.Filter{})
 		return a.readStream(res.Name, ch)
 	}
+	trace.Log("tui.refresh.list", "resource", res.Name)
 	return func() tea.Msg {
 		items, err := res.Store.List(a.ctx, registry.Filter{})
 		return itemsMsg{resource: res.Name, items: items, err: err, final: true}
@@ -178,8 +186,10 @@ func (a *app) readStream(name string, ch <-chan registry.Batch) tea.Cmd {
 	return func() tea.Msg {
 		b, ok := <-ch
 		if !ok {
+			trace.Log("tui.stream.final", "resource", name)
 			return itemsMsg{resource: name, streamed: true, final: true}
 		}
+		trace.Log("tui.stream.batch", "resource", name, "items", len(b.Items), "err", b.Err)
 		return itemsMsg{resource: name, items: b.Items, err: b.Err, streamed: true, next: ch}
 	}
 }
@@ -384,9 +394,21 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
+	trace.Log("tui.wizardDone", "op", msg.op.Name, "hasRun", msg.op.Run != nil, "hasSteps", len(msg.op.Steps) > 0)
 	if msg.op != nil && msg.op.Confirm != "" {
 		a.confirm.Show(msg.op.Confirm, msg.resource, msg.op, msg.input)
 		return a, nil
+	}
+	// Run op collected via the wizard overlay: invoke Run in-process and
+	// synthesize an actionDoneMsg so the TUI refreshes + surfaces errors.
+	if msg.op != nil && msg.op.Run != nil && len(msg.op.Steps) == 0 {
+		op := msg.op
+		input := msg.input
+		return a, func() tea.Msg {
+			err := op.Run(a.ctx, input)
+			trace.Log("tui.wizardDone.run", "op", op.Name, "err", err)
+			return actionDoneMsg{err: err}
+		}
 	}
 	return a, func() tea.Msg {
 		return startSagaMsg{resource: msg.resource, op: msg.op, input: msg.input}
