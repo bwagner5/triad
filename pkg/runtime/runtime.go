@@ -61,6 +61,11 @@ type Event struct {
 	// collected answers (or a nil map to abort the saga).
 	Needs   *registry.NeedInput
 	Provide func(answers registry.Input)
+	// State is a snapshot of the saga's Input at the moment it paused.
+	// Consumers can merge it with wizard answers to render a confirm
+	// summary that shows everything the step is about to run with, not
+	// just the newly-collected fields.
+	State registry.Input
 }
 
 // Run executes an operation's steps synchronously and streams events over the returned channel.
@@ -138,10 +143,15 @@ func solicitInput(
 		default:
 		}
 	}
+	// Snapshot state so the consumer can render a confirm summary.
+	snapshot := registry.Input{}
+	for k, v := range st.Input {
+		snapshot[k] = v
+	}
 	ch <- Event{
 		Saga: op.Name, Resource: res.Name, Step: step.Label,
 		Index: i, Total: total, Status: NeedsInput, At: time.Now(),
-		Needs: need, Provide: provide,
+		Needs: need, Provide: provide, State: snapshot,
 	}
 	select {
 	case <-ctx.Done():

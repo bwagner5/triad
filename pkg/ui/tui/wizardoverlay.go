@@ -82,10 +82,14 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *r
 		if f.Sensitive {
 			ti.EchoMode = textinput.EchoPassword
 		}
-		// Seed text inputs with the field's lazy Prefill so the user can
-		// press Enter to accept a sensible default (git repo name, cwd,
-		// etc.) without making it count as Required-satisfied.
-		if f.Prefill != nil && f.Suggest == nil {
+		// Seed text inputs from Input first (flag/config-supplied values,
+		// and Default writes from bindFields), falling back to the lazy
+		// Prefill (e.g. git repo name) when Input is empty. Ensures the
+		// wizard reflects what'll actually run — the user sees 'dev' for
+		// an env field with Default='dev', not a blank box.
+		if v, ok := input[f.Flag]; ok && v != "" && f.Suggest == nil {
+			ti.SetValue(v)
+		} else if f.Prefill != nil && f.Suggest == nil {
 			if v := f.Prefill(); v != "" {
 				ti.SetValue(v)
 			}

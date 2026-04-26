@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -117,6 +118,19 @@ type app struct {
 	// wizard is collecting the missing fields. The next wizardDoneMsg
 	// feeds the answers back to the runtime via this callback.
 	sagaProvide func(registry.Input)
+	// sagaPreInput snapshots the saga's State.Input at the moment it
+	// paused for NeedsInput, so the confirm overlay can show everything
+	// the step is about to run with — not just the fields the wizard
+	// just collected.
+	sagaPreInput registry.Input
+	// sagaConfirmPrompt is the Confirm label to show before resuming a
+	// paused saga. Derived from the NeedInput Reason (or a default).
+	sagaConfirmPrompt string
+	// pendingProvide / pendingMerged hold the saga-resume callback and
+	// the merged input while the confirm overlay is showing. Populated
+	// in handleWizardDone for paused sagas; drained by the confirm.
+	pendingProvide func(registry.Input)
+	pendingMerged  registry.Input
 	// sagaCh holds the current saga's event channel so handleSagaEvent
 	// can keep draining it via readSagaCmd after each event.
 	sagaCh <-chan runtime.Event
@@ -351,20 +365,7 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Confirm overlay takes priority over everything.
 	if a.confirm.Active() {
-		accepted, confirmed := a.confirm.HandleKey(key)
-		if accepted {
-			if confirmed {
-				return a, func() tea.Msg {
-					return startSagaMsg{
-						resource: a.confirm.resource,
-						op:       a.confirm.op,
-						input:    a.confirm.input,
-					}
-				}
-			}
-			return a, nil
-		}
-		return a, nil
+		return a.handleConfirmKey(key)
 	}
 
 	// Wizard overlay.
@@ -436,16 +437,36 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
 	trace.Log("tui.wizardDone", "op", msg.op.Name, "hasRun", msg.op.Run != nil, "hasSteps", len(msg.op.Steps) > 0, "hasSagaProvide", a.sagaProvide != nil, "canceled", msg.input == nil)
-	// If a saga is paused waiting for input, hand the answers (or nil on
-	// cancel) to its Provide callback and let the runtime decide.
+	// If a saga is paused waiting for input, route through the confirm
+	// overlay so the user reviews the merged inputs (pre-existing State +
+	// new wizard answers) before the saga resumes. Cancel passes nil to
+	// Provide, which aborts.
 	if a.sagaProvide != nil {
 		provide := a.sagaProvide
+		preInput := a.sagaPreInput
+		prompt := a.sagaConfirmPrompt
 		a.sagaProvide = nil
-		answers := msg.input
-		return a, func() tea.Msg {
-			provide(answers)
-			return nil
+		a.sagaPreInput = nil
+		a.sagaConfirmPrompt = ""
+		if msg.input == nil {
+			// User canceled the wizard — abort the saga.
+			return a, func() tea.Msg { provide(nil); return nil }
 		}
+		merged := registry.Input{}
+		for k, v := range preInput {
+			merged[k] = v
+		}
+		for k, v := range msg.input {
+			merged[k] = v
+		}
+		// Route through confirm. On Yes, startSagaMsg won't fire (we have
+		// no new saga); instead we reuse the confirm overlay with a
+		// synthetic op whose Fields cover the merged keys, and route the
+		// confirm decision back to Provide via a.pendingProvide.
+		a.pendingProvide = provide
+		a.pendingMerged = merged
+		a.confirm.Show(prompt, nil, sagaNeedConfirmOp(merged), merged)
+		return a, nil
 	}
 	// Non-saga cancel: drop on the floor.
 	if msg.input == nil {
@@ -526,6 +547,11 @@ func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
 	if ev.Status == runtime.NeedsInput && ev.Needs != nil && ev.Provide != nil {
 		trace.Log("tui.saga.needsInput", "step", ev.Step, "fields", len(ev.Needs.Fields))
 		a.sagaProvide = ev.Provide
+		a.sagaPreInput = ev.State
+		a.sagaConfirmPrompt = ev.Needs.Reason
+		if a.sagaConfirmPrompt == "" {
+			a.sagaConfirmPrompt = "Ready to continue?"
+		}
 		input := registry.Input{}
 		return a, tea.Batch(
 			a.wizard.Show(a.ctx, nil, sagaNeedOp(ev.Needs), ev.Needs.Fields, input),
@@ -547,6 +573,38 @@ func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
 	return a, drain()
 }
 
+// handleConfirmKey routes a key into the active confirm overlay and
+// dispatches Yes/No to either the saga-resume Provide callback (paused
+// saga) or the startSaga path (fresh Confirm-gated op).
+func (a *app) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
+	accepted, confirmed := a.confirm.HandleKey(key)
+	if !accepted {
+		return a, nil
+	}
+	// Case 1: saga-resume confirm (pendingProvide set).
+	if a.pendingProvide != nil {
+		provide := a.pendingProvide
+		merged := a.pendingMerged
+		a.pendingProvide = nil
+		a.pendingMerged = nil
+		if confirmed {
+			return a, func() tea.Msg { provide(merged); return nil }
+		}
+		return a, func() tea.Msg { provide(nil); return nil }
+	}
+	// Case 2: fresh-saga confirm (Operation.Confirm).
+	if confirmed {
+		return a, func() tea.Msg {
+			return startSagaMsg{
+				resource: a.confirm.resource,
+				op:       a.confirm.op,
+				input:    a.confirm.input,
+			}
+		}
+	}
+	return a, nil
+}
+
 // sagaNeedOp is a synthetic Operation just so the wizard overlay has a
 // name to render for a NeedsInput prompt. It is never executed.
 func sagaNeedOp(n *registry.NeedInput) *registry.Operation {
@@ -555,6 +613,22 @@ func sagaNeedOp(n *registry.NeedInput) *registry.Operation {
 		name = n.Reason
 	}
 	return &registry.Operation{Name: name, Fields: n.Fields}
+}
+
+// sagaNeedConfirmOp builds a synthetic Operation whose Fields list every
+// key in merged so the confirm overlay's summary can render each one.
+// Sorted for stable output. Never executed — just feeds the summary.
+func sagaNeedConfirmOp(merged registry.Input) *registry.Operation {
+	keys := make([]string, 0, len(merged))
+	for k := range merged {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	fields := make([]registry.Field, 0, len(keys))
+	for _, k := range keys {
+		fields = append(fields, registry.Field{Flag: k})
+	}
+	return &registry.Operation{Name: "confirm", Fields: fields}
 }
 
 // subscribeBus relays saga events from the app's bus back into the TUI.
