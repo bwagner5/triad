@@ -587,38 +587,42 @@ func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
 // saga) or the startSaga path (fresh Confirm-gated op).
 func (a *app) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 	accepted, confirmed := a.confirm.HandleKey(key)
-	trace.Log("tui.confirm.key", "key", key, "accepted", accepted, "confirmed", confirmed, "pendingProvide", a.pendingProvide != nil)
-	if !accepted {
+	// The overlay returns accepted=true for navigation keys (arrows/tab)
+	// that change the Yes/No cursor but don't make a decision. We must
+	// NOT treat those as a final answer, or pressing → to focus Yes
+	// would immediately abort the saga (pendingProvide drained, confirmed
+	// still false because the cursor was flipped but Enter not pressed).
+	// confirm.active goes false only on a terminal key (y/n/esc/enter).
+	decided := accepted && !a.confirm.Active()
+	trace.Log("tui.confirm.key", "key", key, "accepted", accepted, "confirmed", confirmed, "decided", decided, "pendingProvide", a.pendingProvide != nil)
+	if !decided {
 		return a, nil
 	}
-	// Case 1: saga-resume confirm (pendingProvide set).
+	// Case 1: saga-resume confirm.
 	if a.pendingProvide != nil {
 		provide := a.pendingProvide
 		merged := a.pendingMerged
 		a.pendingProvide = nil
 		a.pendingMerged = nil
+		trace.Log("tui.confirm.routed", "path", "saga-resume", "confirmed", confirmed)
 		if confirmed {
-			// Deliver answers to the runtime, then keep draining the saga
-			// channel. Without a subsequent readSagaCmd, the runtime's
-			// post-resume events would fill the buffer and stall with no
-			// reader to wake things up — i.e. 'I said yes and nothing
-			// happened'.
 			provideCmd := func() tea.Msg { provide(merged); return nil }
 			if a.sagaCh != nil {
 				return a, tea.Batch(provideCmd, readSagaCmd(a.sagaCh))
 			}
 			return a, provideCmd
 		}
-		// Abort: tell the runtime we're not providing input. Still need
-		// to drain so its post-abort Failed/Done events arrive.
 		abortCmd := func() tea.Msg { provide(nil); return nil }
 		if a.sagaCh != nil {
 			return a, tea.Batch(abortCmd, readSagaCmd(a.sagaCh))
 		}
 		return a, abortCmd
 	}
-	// Case 2: fresh-saga confirm (Operation.Confirm).
-	if confirmed {
+	// Case 2: fresh-saga confirm (Operation.Confirm). Guard: only fire
+	// startSaga if the op actually has Steps or Run — protects against
+	// a stray synthetic op slipping through.
+	if confirmed && a.confirm.op != nil && (len(a.confirm.op.Steps) > 0 || a.confirm.op.Run != nil) {
+		trace.Log("tui.confirm.routed", "path", "fresh-saga", "op", a.confirm.op.Name)
 		return a, func() tea.Msg {
 			return startSagaMsg{
 				resource: a.confirm.resource,
@@ -627,6 +631,7 @@ func (a *app) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	trace.Log("tui.confirm.routed", "path", "dismiss", "confirmed", confirmed)
 	return a, nil
 }
 
