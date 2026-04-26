@@ -34,6 +34,10 @@ type wizardOverlay struct {
 	selIdx  []int               // per-field selection cursor
 
 	errs []string // per-field validation error
+	// busy is true after submit() while we wait for the saga or next
+	// wizard to advance. Renders a spinner+message instead of dismissing
+	// the overlay, so users get continuous feedback.
+	busy bool
 	w, h int
 }
 
@@ -46,6 +50,7 @@ func (wo *wizardOverlay) SetSize(w, h int) { wo.w, wo.h = w, h }
 
 func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *registry.Operation, fields []registry.Field, input registry.Input) tea.Cmd {
 	wo.active = true
+	wo.busy = false
 	wo.ctx = ctx
 	wo.resource = res
 	wo.op = op
@@ -115,6 +120,7 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *r
 
 func (wo *wizardOverlay) Clear() {
 	wo.active = false
+	wo.busy = false
 	wo.fields = nil
 	wo.inputs = nil
 	wo.pickers = nil
@@ -185,7 +191,10 @@ func (wo *wizardOverlay) submit() tea.Cmd {
 	for i, f := range wo.fields {
 		wo.input[f.Flag] = wo.fieldValue(i)
 	}
-	wo.active = false
+	// Keep the overlay active showing a "working" spinner so the user
+	// gets continuous visual feedback instead of a flash-then-next-screen.
+	// The next Show() / Clear() supersedes this.
+	wo.busy = true
 	return func() tea.Msg {
 		return wizardDoneMsg{resource: wo.resource, op: wo.op, input: wo.input}
 	}
@@ -237,6 +246,20 @@ type wizardDoneMsg struct {
 func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 	if !wo.active {
 		return false, nil
+	}
+	// Busy overlay absorbs key presses (wizard was submitted; nothing
+	// to interact with yet) but still forwards spinner ticks so the
+	// animation keeps running.
+	if wo.busy {
+		if _, isKey := msg.(tea.KeyPressMsg); isKey {
+			return true, nil
+		}
+		if _, isTick := msg.(spinner.TickMsg); isTick {
+			var cmd tea.Cmd
+			wo.spin, cmd = wo.spin.Update(msg)
+			return true, cmd
+		}
+		return true, nil
 	}
 	// Non-key, non-wizard messages (readDirMsg from filepicker.Init, etc.)
 	// need to reach every picker regardless of focus — the picker filters
@@ -440,6 +463,15 @@ func (wo *wizardOverlay) Box(w, h int) string {
 	opName := ""
 	if wo.op != nil {
 		opName = wo.op.Name
+	}
+
+	// Busy state: wizard was submitted; we're waiting for the saga to
+	// either ask for more input or complete. Render a spinner instead
+	// of the (now stale) form fields so users get continuous feedback.
+	if wo.busy {
+		body := theme.Heading.Render(opName) + "\n\n" +
+			"  " + wo.spin.View() + " " + theme.MutedText.Render("Working…") + "\n"
+		return theme.Border.Width(width).Render(body)
 	}
 
 	var body strings.Builder

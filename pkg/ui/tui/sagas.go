@@ -99,6 +99,8 @@ func (a *app) startSaga(msg startSagaMsg) tea.Cmd {
 	ch := runtime.Run(a.ctx, a.bus, res, *msg.op, msg.input)
 	a.sagaCh = ch
 	a.saga.Start(msg.op.Name)
+	// Saga owns the screen now — the wizard's busy spinner is obsolete.
+	a.wizard.Clear()
 	return readSagaCmd(ch)
 }
 

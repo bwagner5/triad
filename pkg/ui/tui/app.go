@@ -449,8 +449,13 @@ func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
 		a.sagaPreInput = nil
 		a.sagaConfirmPrompt = ""
 		if msg.input == nil {
-			// User canceled the wizard — abort the saga.
-			return a, func() tea.Msg { provide(nil); return nil }
+			// User canceled the wizard — abort the saga. Drain the
+			// channel so its post-abort events arrive.
+			abortCmd := func() tea.Msg { provide(nil); return nil }
+			if a.sagaCh != nil {
+				return a, tea.Batch(abortCmd, readSagaCmd(a.sagaCh))
+			}
+			return a, abortCmd
 		}
 		merged := registry.Input{}
 		for k, v := range preInput {
@@ -465,6 +470,8 @@ func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
 		// confirm decision back to Provide via a.pendingProvide.
 		a.pendingProvide = provide
 		a.pendingMerged = merged
+		// Close the wizard so the confirm overlay has the stage.
+		a.wizard.Clear()
 		a.confirm.Show(prompt, nil, sagaNeedConfirmOp(merged), merged)
 		return a, nil
 	}
@@ -473,6 +480,7 @@ func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 	if msg.op != nil && msg.op.Confirm != "" {
+		a.wizard.Clear()
 		a.confirm.Show(msg.op.Confirm, msg.resource, msg.op, msg.input)
 		return a, nil
 	}
@@ -588,9 +596,24 @@ func (a *app) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 		a.pendingProvide = nil
 		a.pendingMerged = nil
 		if confirmed {
-			return a, func() tea.Msg { provide(merged); return nil }
+			// Deliver answers to the runtime, then keep draining the saga
+			// channel. Without a subsequent readSagaCmd, the runtime's
+			// post-resume events would fill the buffer and stall with no
+			// reader to wake things up — i.e. 'I said yes and nothing
+			// happened'.
+			provideCmd := func() tea.Msg { provide(merged); return nil }
+			if a.sagaCh != nil {
+				return a, tea.Batch(provideCmd, readSagaCmd(a.sagaCh))
+			}
+			return a, provideCmd
 		}
-		return a, func() tea.Msg { provide(nil); return nil }
+		// Abort: tell the runtime we're not providing input. Still need
+		// to drain so its post-abort Failed/Done events arrive.
+		abortCmd := func() tea.Msg { provide(nil); return nil }
+		if a.sagaCh != nil {
+			return a, tea.Batch(abortCmd, readSagaCmd(a.sagaCh))
+		}
+		return a, abortCmd
 	}
 	// Case 2: fresh-saga confirm (Operation.Confirm).
 	if confirmed {
