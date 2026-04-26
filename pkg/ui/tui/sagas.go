@@ -39,6 +39,16 @@ func (a *app) launchOp(res *registry.Resource, op *registry.Operation, input reg
 	if input == nil {
 		input = registry.Input{}
 	}
+	// Run Pre (e.g. hydrate defaults from a config file) so the 'missing'
+	// calculation below sees a fully-populated Input. Pre errors bubble
+	// up as a toast via the same Failed-event path the saga uses so the
+	// user sees what went wrong.
+	if op.Pre != nil {
+		if err := op.Pre(a.ctx, input); err != nil {
+			trace.Log("tui.launchOp.preErr", "op", op.Name, "err", err)
+			return a.showToast(toastErr, err.Error())
+		}
+	}
 	missing := missingRequired(op.Fields, input)
 	resName := ""
 	if res != nil {

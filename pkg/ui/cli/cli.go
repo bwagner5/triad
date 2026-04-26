@@ -213,6 +213,11 @@ func sagaCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 		Aliases: op.Aliases,
 		Short:   op.Short,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if op.Pre != nil {
+				if err := op.Pre(cmd.Context(), in); err != nil {
+					return err
+				}
+			}
 			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
 				return err
 			}
@@ -230,6 +235,11 @@ func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 		Aliases: op.Aliases,
 		Short:   op.Short,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if op.Pre != nil {
+				if err := op.Pre(cmd.Context(), in); err != nil {
+					return err
+				}
+			}
 			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
 				return err
 			}

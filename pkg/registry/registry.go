@@ -195,6 +195,11 @@ type Operation struct {
 	// executes once and writes directly to stdout. In the TUI, it runs via
 	// tea.Exec which temporarily releases the terminal.
 	Run func(ctx context.Context, in Input) error
+	// Pre runs before required-field validation. It can mutate Input (e.g.
+	// hydrate defaults from a config file) so the wizard/CLI prompt only
+	// for fields still empty afterwards. Returning an error aborts the op
+	// before any prompting or step execution.
+	Pre func(ctx context.Context, in Input) error
 }
 
 // Resource is the central declaration that drives all three UIs.
