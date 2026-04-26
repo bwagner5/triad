@@ -470,6 +470,7 @@ func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
 		// confirm decision back to Provide via a.pendingProvide.
 		a.pendingProvide = provide
 		a.pendingMerged = merged
+		trace.Log("tui.confirm.armed", "fields", len(merged))
 		// Close the wizard so the confirm overlay has the stage.
 		a.wizard.Clear()
 		a.confirm.Show(prompt, nil, sagaNeedConfirmOp(merged), merged)
@@ -586,6 +587,7 @@ func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
 // saga) or the startSaga path (fresh Confirm-gated op).
 func (a *app) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 	accepted, confirmed := a.confirm.HandleKey(key)
+	trace.Log("tui.confirm.key", "key", key, "accepted", accepted, "confirmed", confirmed, "pendingProvide", a.pendingProvide != nil)
 	if !accepted {
 		return a, nil
 	}
