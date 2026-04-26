@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 
@@ -178,6 +179,28 @@ func (wo *wizardOverlay) submit() tea.Cmd {
 	}
 }
 
+// validateField runs the per-field Validate (if any) against the current
+// value. Returns nil if valid or unset-and-optional, an error otherwise.
+func (wo *wizardOverlay) validateField(i int) error {
+	if i >= len(wo.fields) {
+		return nil
+	}
+	f := wo.fields[i]
+	val := wo.fieldValue(i)
+	if val == "" {
+		if f.Required {
+			return errRequired
+		}
+		return nil
+	}
+	if f.Validate != nil {
+		return f.Validate(val)
+	}
+	return nil
+}
+
+var errRequired = fmt.Errorf("required")
+
 func (wo *wizardOverlay) fieldValue(i int) string {
 	if wo.isSelect(i) {
 		if len(wo.choices[i]) > 0 && wo.selIdx[i] < len(wo.choices[i]) {
@@ -240,9 +263,12 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 		wo.pickers[wo.idx] = &newFp
 		if didSelect, path := newFp.DidSelectFile(msg); didSelect {
 			wo.pickers[wo.idx].Path = path
-			// Auto-submit on select: the user pressed enter on a file,
-			// we got the commit, advance the wizard. If other required
-			// fields are still empty, submit() will focus the first one.
+			// File selected: advance to next field if there is one,
+			// else submit. Prevents accidental submit when the user
+			// expects enter to just commit the file.
+			if wo.idx < len(wo.fields)-1 {
+				return true, tea.Batch(cmd, wo.focusField(wo.idx+1))
+			}
 			return true, tea.Batch(cmd, wo.submit())
 		}
 		return true, cmd
@@ -295,10 +321,13 @@ func (wo *wizardOverlay) fileKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		return true, nil
 	case "enter":
 		// Enter is overloaded: the filepicker uses it to open a directory
-		// OR select a file. Only one of those is "submit the wizard".
-		// If the picker already has a Path committed, treat enter as
-		// submit; otherwise let the picker handle it.
+		// OR select a file. Only one of those is "commit the field".
+		// If the picker already has a Path committed, advance to next
+		// field (or submit when on the last field).
 		if wo.pickers[wo.idx] != nil && wo.pickers[wo.idx].Path != "" {
+			if wo.idx < len(wo.fields)-1 {
+				return true, wo.focusField(wo.idx + 1)
+			}
 			return true, wo.submit()
 		}
 		return false, nil
@@ -331,6 +360,20 @@ func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	case "enter":
+		// Enter on a non-last field advances to the next field (natural
+		// typing flow). Enter on the last field submits. For select
+		// fields that have choices, enter on last-field also submits;
+		// on non-last, it commits the selection and advances.
+		if wo.idx < len(wo.fields)-1 {
+			// Run field-level validation before advancing so the user
+			// doesn't tab past a bad value unknowingly.
+			if err := wo.validateField(wo.idx); err != nil {
+				wo.errs[wo.idx] = err.Error()
+				return nil
+			}
+			wo.errs[wo.idx] = ""
+			return wo.focusField(wo.idx + 1)
+		}
 		return wo.submit()
 	}
 	// Selection list navigation for Suggest fields.
@@ -422,7 +465,7 @@ func (wo *wizardOverlay) Box(w, h int) string {
 		}
 	}
 
-	body.WriteString("\n" + theme.MutedText.Render("  tab/shift+tab navigate · enter submit · esc cancel"))
+	body.WriteString("\n" + theme.MutedText.Render("  tab/shift+tab · enter: next (or submit on last field) · esc cancel"))
 
 	return theme.Border.Width(width).Render(body.String())
 }
