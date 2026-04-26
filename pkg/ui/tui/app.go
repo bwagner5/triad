@@ -614,7 +614,7 @@ func (a *app) View() tea.View {
 		overlays = append(overlays, centeredLayer(a.palette.Box(w, h), w, h, 3))
 	}
 	if a.saga.Active() {
-		overlays = append(overlays, centeredLayer(a.saga.Box(w, h), w, h, 4))
+		overlays = append(overlays, centeredLayer(a.saga.Box(w, h, a.spin.View()), w, h, 4))
 	}
 	if a.confirm.Active() {
 		overlays = append(overlays, centeredLayer(a.confirm.Box(w, h), w, h, 5))

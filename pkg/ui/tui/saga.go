@@ -59,14 +59,17 @@ func (s *sagaOverlay) DismissAfter() tea.Cmd {
 	return tea.Tick(d, func(_ time.Time) tea.Msg { return dismissSagaMsg{} })
 }
 
-func (s *sagaOverlay) Box(w, _ int) string {
+// Box renders the overlay. spinnerFrame is the current frame of the app's
+// spinner — passed in so the Running step shows live animation instead of
+// a static glyph (users read 'frozen glyph' as 'stuck').
+func (s *sagaOverlay) Box(w, _ int, spinnerFrame string) string {
 	header := theme.Heading.Render("Running: " + s.name)
 	lines := header + "\n\n"
 	for _, e := range s.events {
 		mark := theme.PendMark
 		switch e.Status {
 		case runtime.Running:
-			mark = theme.RunMark
+			mark = spinnerFrame
 		case runtime.OK:
 			mark = theme.OKMark
 		case runtime.Failed:

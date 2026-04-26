@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"charm.land/lipgloss/v2"
 	"github.com/bwagner5/triad/pkg/registry"
@@ -60,7 +62,7 @@ func (c *confirmOverlay) HandleKey(key string) (accepted, confirmed bool) {
 }
 
 func (c *confirmOverlay) Box(w, _ int) string {
-	width := 50
+	width := 60
 	if w < width+4 {
 		width = w - 4
 	}
@@ -82,6 +84,47 @@ func (c *confirmOverlay) Box(w, _ int) string {
 
 	hint := theme.MutedText.Render("y/n · enter · esc to cancel")
 
-	body := prompt + "\n\n" + buttons + "\n\n" + hint
+	body := prompt
+	if summary := c.renderSummary(); summary != "" {
+		body += "\n\n" + summary
+	}
+	body += "\n\n" + buttons + "\n\n" + hint
 	return theme.Border.Width(width).Render(body)
+}
+
+// renderSummary prints each of the op's Fields with its value from Input,
+// sorted by flag name. Sensitive fields are masked. Empty when there's
+// nothing to summarize.
+func (c *confirmOverlay) renderSummary() string {
+	if c.op == nil || len(c.op.Fields) == 0 || len(c.input) == 0 {
+		return ""
+	}
+	// Sort by flag for stable rendering.
+	fields := append([]registry.Field(nil), c.op.Fields...)
+	sort.Slice(fields, func(i, j int) bool { return fields[i].Flag < fields[j].Flag })
+
+	maxLabel := 0
+	for _, f := range fields {
+		if len(f.Flag) > maxLabel {
+			maxLabel = len(f.Flag)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(theme.Label.Render("Summary"))
+	b.WriteString("\n")
+	for _, f := range fields {
+		v, ok := c.input[f.Flag]
+		if !ok || v == "" {
+			continue
+		}
+		if f.Sensitive {
+			v = strings.Repeat("•", len(v))
+		}
+		fmt.Fprintf(&b, "  %s  %s\n",
+			theme.MutedText.Render(fmt.Sprintf("%-*s", maxLabel, f.Flag)),
+			theme.Value.Render(v),
+		)
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
