@@ -57,6 +57,10 @@ func (a *app) keyMap() []binding {
 			a.mode = modeList
 			return a, nil
 		}},
+		binding{Key: "backspace", Label: "back", Cat: "Navigation", Run: func(a *app) (tea.Model, tea.Cmd) {
+			a.mode = modeList
+			return a, nil
+		}},
 	)
 
 	// ---- Resource (contextual: from current resource's operations) ----

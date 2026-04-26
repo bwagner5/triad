@@ -82,16 +82,24 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *r
 		if f.Sensitive {
 			ti.EchoMode = textinput.EchoPassword
 		}
-		// Seed text inputs from Input first (flag/config-supplied values,
-		// and Default writes from bindFields), falling back to the lazy
-		// Prefill (e.g. git repo name) when Input is empty. Ensures the
-		// wizard reflects what'll actually run — the user sees 'dev' for
-		// an env field with Default='dev', not a blank box.
-		if v, ok := input[f.Flag]; ok && v != "" && f.Suggest == nil {
-			ti.SetValue(v)
-		} else if f.Prefill != nil && f.Suggest == nil {
-			if v := f.Prefill(); v != "" {
-				ti.SetValue(v)
+		// Seed text inputs with precedence: Input value > lazy Prefill >
+		// static Default. Ensures the wizard reflects what'll actually
+		// run — the user sees 'dev' for an env field with Default='dev'
+		// regardless of whether they reached the wizard via CLI flags
+		// (bindFields already populated Input) or TUI key binding (Input
+		// empty; Default wasn't applied). Suggest fields read from
+		// choices, not text input, so skip them.
+		if f.Suggest == nil {
+			var seed string
+			if v, ok := input[f.Flag]; ok && v != "" {
+				seed = v
+			} else if f.Prefill != nil {
+				seed = f.Prefill()
+			} else if f.Default != nil {
+				seed = fmt.Sprintf("%v", f.Default)
+			}
+			if seed != "" {
+				ti.SetValue(seed)
 			}
 		}
 		wo.inputs[i] = ti
