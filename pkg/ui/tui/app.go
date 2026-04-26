@@ -98,7 +98,11 @@ type app struct {
 	// itemsMsgs tagged with an older gen are ignored — prevents dup
 	// items when a new refresh begins before the previous stream drains.
 	streamGen int
-	spin      spinner.Model
+	// seenGen is the gen whose first batch we've already applied (via
+	// replace). Subsequent batches within the same gen append. Keeps the
+	// old table visible during refresh until new data arrives.
+	seenGen int
+	spin    spinner.Model
 
 	// Toast flash messages (top of screen).
 	toast *toast
@@ -181,11 +185,12 @@ func (a *app) refresh() tea.Cmd {
 	// If the Store is streaming-capable, consume its channel and emit one
 	// itemsMsg per batch so the UI can render progressively. Otherwise
 	// fall back to the blocking List.
+	//
+	// We do NOT reset a.items here — keep the old table visible until the
+	// first batch of the new stream arrives, then replace. handleItems
+	// tracks which gens it has seen a first batch for.
 	if ss, ok := res.Store.(registry.StreamStore); ok {
 		trace.Log("tui.refresh.stream", "resource", res.Name, "gen", gen)
-		// Reset items so the first batch replaces, not appends to, the
-		// previous refresh cycle's results.
-		a.items = a.items[:0]
 		ch := ss.StreamList(a.ctx, registry.Filter{})
 		return a.readStream(res.Name, ch, gen)
 	}
@@ -233,7 +238,9 @@ func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 		a.nextRefresh = a.lastRefresh.Add(a.sched.Interval(a.resource.Name))
 		return a, a.scheduleRefresh()
 	}
-	// Streaming: per-batch append; error batches become toasts but don't stop the stream.
+	// Streaming: first batch of a new gen replaces; subsequent batches
+	// append. Keeps the old table stable during refresh — rows disappear
+	// only when they've been superseded by fresh data.
 	if msg.err != nil {
 		cmds := []tea.Cmd{a.showToast(toastErr, msg.err.Error())}
 		if msg.next != nil {
@@ -242,7 +249,18 @@ func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 	}
 	if len(msg.items) > 0 {
-		a.items = append(a.items, msg.items...)
+		if msg.gen != a.seenGen {
+			// First batch of a fresh cycle: replace the old table.
+			a.items = append(a.items[:0], msg.items...)
+			a.seenGen = msg.gen
+		} else {
+			a.items = append(a.items, msg.items...)
+		}
+	} else if msg.final && msg.gen != a.seenGen {
+		// Edge case: stream produced no batches at all (empty result).
+		// Drop the old table now rather than leave stale rows.
+		a.items = a.items[:0]
+		a.seenGen = msg.gen
 	}
 	if msg.final {
 		a.refreshing = false
