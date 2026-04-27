@@ -72,7 +72,10 @@ type Event struct {
 // The channel is closed when the operation is complete.
 // If bus is non-nil, the final Done event is also published to it (for cross-component signaling).
 func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Operation, in registry.Input) <-chan Event {
-	ch := make(chan Event, len(op.Steps)+2)
+	// Buffer: 3x steps covers Running+OK/Failed/Skipped plus NeedsInput
+	// and Done headroom, so the runtime goroutine never blocks on send
+	// even if the consumer drains slowly (per-render in a TUI).
+	ch := make(chan Event, len(op.Steps)*3+4)
 	go func() {
 		defer close(ch)
 		st := &registry.State{Input: in, Data: map[string]any{}}
