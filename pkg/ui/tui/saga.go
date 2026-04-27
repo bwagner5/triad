@@ -66,6 +66,14 @@ func (s *sagaOverlay) Box(w, _ int, spinnerFrame string) string {
 	header := theme.Heading.Render("Running: " + s.name)
 	lines := header + "\n\n"
 	for _, e := range s.events {
+		// Skip empty slots. Push may grow the events slice when an
+		// event arrives for Index N before events for 0..N-1, and an
+		// empty-slot row (rendered as '(pending)') looks like a frozen
+		// step to the user. Only render slots we've actually received
+		// an event for.
+		if e.Step == "" {
+			continue
+		}
 		mark := theme.PendMark
 		switch e.Status {
 		case runtime.Running:
@@ -77,11 +85,7 @@ func (s *sagaOverlay) Box(w, _ int, spinnerFrame string) string {
 		case runtime.Skipped:
 			mark = theme.SkipMark
 		}
-		label := e.Step
-		if label == "" {
-			label = theme.MutedText.Render("(pending)")
-		}
-		lines += fmt.Sprintf("  %s %s\n", mark, label)
+		lines += fmt.Sprintf("  %s %s\n", mark, e.Step)
 	}
 	if s.done {
 		lines += "\n"
