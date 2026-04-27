@@ -490,6 +490,10 @@ func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
 	if msg.op != nil && msg.op.Run != nil && len(msg.op.Steps) == 0 {
 		op := msg.op
 		input := msg.input
+		// Clear the wizard overlay first — otherwise its 'Working…' busy
+		// state persists forever because nothing else dismisses it on
+		// the Run path (saga paths call Clear inside startSaga).
+		a.wizard.Clear()
 		return a, func() tea.Msg {
 			err := op.Run(a.ctx, input)
 			trace.Log("tui.wizardDone.run", "op", op.Name, "err", err)
