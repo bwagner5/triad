@@ -264,9 +264,12 @@ func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input, g 
 		// <CLINAME>_<FLAG> env var overrides the static Default.
 		if env := g.getenv(FlagToEnvVar(cliName, f.Flag)); env != "" {
 			v = env
-		}
-		if v != "" {
-			in[f.Flag] = v
+			// Only env-var overrides go into Input. Default values are
+			// NOT written here — the wizard seeds them via 3-tier
+			// precedence (Input > Prefill > Default) so the user still
+			// gets prompted. Non-interactive mode applies defaults in
+			// CompleteInput.
+			in[f.Flag] = env
 		}
 		vals[i] = &v
 		c.Flags().StringVarP(vals[i], f.Flag, f.Short, v, envHelp(cliName, f.Flag, f.Help))
@@ -350,11 +353,19 @@ func CompleteInput(ctx context.Context, fields []registry.Field, in registry.Inp
 		return nil
 	}
 	if !interactive {
-		var names []string
+		// Non-interactive: apply defaults to satisfy missing fields.
+		var stillMissing []string
 		for _, f := range missing {
-			names = append(names, "--"+f.Flag)
+			if f.Default != nil {
+				in[f.Flag] = fmt.Sprintf("%v", f.Default)
+			} else {
+				stillMissing = append(stillMissing, "--"+f.Flag)
+			}
 		}
-		return fmt.Errorf("missing required flags: %v (pass --no-interactive=false or drop -y to prompt)", names)
+		if len(stillMissing) > 0 {
+			return fmt.Errorf("missing required flags: %v (pass --no-interactive=false or drop -y to prompt)", stillMissing)
+		}
+		return nil
 	}
 	if prompter == nil {
 		prompter = defaultPrompter

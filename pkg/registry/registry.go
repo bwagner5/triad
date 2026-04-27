@@ -40,9 +40,10 @@ type Field struct {
 	Short    string // e.g. "n"
 	Help     string
 	Required bool
-	// Default sets a static pre-filled value. It satisfies Required (so
-	// the wizard won't prompt). Use for settings like "env defaults to
-	// dev" where prompting would be noise.
+	// Default sets a static pre-filled value. The wizard still prompts
+	// for the field but seeds the input with this value so the user can
+	// press Enter to accept or type to override. In non-interactive
+	// mode (-y), the default is applied automatically.
 	Default any
 	// Prefill is a lazy hint evaluated when the wizard runs. Unlike
 	// Default it does NOT satisfy Required — the wizard still opens and

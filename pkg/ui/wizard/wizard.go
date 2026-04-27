@@ -9,8 +9,12 @@ package wizard
 import (
 	"context"
 	"fmt"
+	"os"
+	"strings"
+	"unicode"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/filepicker"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	"github.com/bwagner5/triad/pkg/registry"
@@ -46,6 +50,7 @@ type model struct {
 	idx    int
 
 	ti        textinput.Model
+	fp        *filepicker.Model // non-nil when current field is File
 	spin      spinner.Model
 	loading   bool
 	choices   []registry.Choice
@@ -77,6 +82,12 @@ func (m *model) isSelect() bool {
 	return f != nil && f.Suggest != nil
 }
 
+// isFile returns true when the current field should be rendered as a file picker.
+func (m *model) isFile() bool {
+	f := m.curField()
+	return f != nil && f.File
+}
+
 func (m *model) Init() tea.Cmd {
 	return tea.Batch(m.startField(), m.spin.Tick)
 }
@@ -88,6 +99,7 @@ func (m *model) startField() tea.Cmd {
 		return tea.Quit
 	}
 	m.ti.Reset()
+	m.fp = nil
 	m.selIdx = 0
 	m.choices = nil
 	m.err = nil
@@ -97,16 +109,36 @@ func (m *model) startField() tea.Cmd {
 		m.loading = true
 		return m.fetchSuggest(*f)
 	}
+	if f.File {
+		// File picker mode.
+		fp := filepicker.New()
+		fp.AllowedTypes = f.AllowedExts
+		fp.ShowHidden = false
+		fp.AutoHeight = false
+		fp.SetHeight(10)
+		if cwd, err := os.Getwd(); err == nil {
+			fp.CurrentDirectory = cwd
+		}
+		m.fp = &fp
+		m.ti.Blur()
+		m.loading = false
+		return fp.Init()
+	}
 	// Text input mode.
 	m.loading = false
 	m.ti.Placeholder = f.Help
-	// Seed with the field's lazy Prefill so the user can press Enter to
-	// accept a sensible default (e.g. the current git repo name) or type
-	// to override.
-	if f.Prefill != nil {
-		if v := f.Prefill(); v != "" {
-			m.ti.SetValue(v)
-		}
+	// Seed with 3-tier precedence: Input > Prefill > Default.
+	// Matches the TUI wizard so both UIs behave identically.
+	var seed string
+	if v, ok := m.in[f.Flag]; ok && v != "" {
+		seed = v
+	} else if f.Prefill != nil {
+		seed = f.Prefill()
+	} else if f.Default != nil {
+		seed = fmt.Sprintf("%v", f.Default)
+	}
+	if seed != "" {
+		m.ti.SetValue(seed)
 	}
 	if f.Sensitive {
 		m.ti.EchoMode = textinput.EchoPassword
@@ -150,6 +182,19 @@ func (m *model) commitAndAdvance(val string) tea.Cmd {
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Forward non-key messages to the file picker when active.
+	if m.isFile() && m.fp != nil {
+		if _, isKey := msg.(tea.KeyPressMsg); !isKey {
+			if _, isSuggest := msg.(suggestMsg); !isSuggest {
+				if _, isTick := msg.(spinner.TickMsg); !isTick {
+					fp := *m.fp
+					newFp, cmd := fp.Update(msg)
+					m.fp = &newFp
+					return m, cmd
+				}
+			}
+		}
+	}
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
@@ -159,6 +204,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.curField() == nil {
 				return m, tea.Quit
+			}
+			if m.isFile() {
+				// Enter on file picker: if a file is selected, commit it.
+				// Otherwise let the picker handle it (directory open).
+				if m.fp != nil && m.fp.Path != "" {
+					return m, m.commitAndAdvance(m.fp.Path)
+				}
+				// Let the picker handle enter (open directory).
+				fp := *m.fp
+				newFp, cmd := fp.Update(msg)
+				m.fp = &newFp
+				if didSelect, path := newFp.DidSelectFile(msg); didSelect {
+					m.fp.Path = path
+					return m, m.commitAndAdvance(path)
+				}
+				return m, cmd
 			}
 			if m.isSelect() {
 				if m.loading || len(m.choices) == 0 {
@@ -182,6 +243,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		// Forward key events to file picker when active.
+		if m.isFile() && m.fp != nil {
+			fp := *m.fp
+			newFp, cmd := fp.Update(msg)
+			m.fp = &newFp
+			if didSelect, path := newFp.DidSelectFile(msg); didSelect {
+				m.fp.Path = path
+				return m, m.commitAndAdvance(path)
+			}
+			return m, cmd
+		}
 	case suggestMsg:
 		if msg.idx != m.idx {
 			return m, nil
@@ -198,7 +270,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
 	}
-	if !m.isSelect() {
+	if !m.isSelect() && !m.isFile() {
 		var cmd tea.Cmd
 		m.ti, cmd = m.ti.Update(msg)
 		return m, cmd
@@ -215,24 +287,27 @@ func (m *model) View() tea.View {
 	if f == nil {
 		return tea.NewView(s)
 	}
-	label := theme.Label.Render(f.Flag)
+	// Label: use title-cased Help (e.g. "App Name") when available,
+	// falling back to the flag name. Matches the TUI wizard's behavior
+	// of putting Help into the placeholder, not the label.
+	labelText := f.Flag
+	if f.Help != "" {
+		labelText = titleCase(f.Help)
+	}
+	label := theme.Label.Render(labelText)
 	if f.Required {
 		label += theme.Err.Render(" *")
 	}
-	if f.Help != "" {
-		label += theme.MutedText.Render("  " + f.Help)
-	}
-	// Skip label if the selection list is self-describing (has Display set).
-	showLabel := !m.isSelect()
-	if showLabel {
-		s += label + "\n"
-	}
+	label += theme.MutedText.Render(":")
+	s += label + "\n"
 
 	switch {
 	case m.isSelect() && m.loading:
 		s += m.spin.View() + " " + theme.MutedText.Render("loading…") + "\n"
 	case m.isSelect():
 		s += m.renderChoices()
+	case m.isFile():
+		s += m.renderFile()
 	default:
 		s += m.ti.View() + "\n"
 	}
@@ -240,6 +315,17 @@ func (m *model) View() tea.View {
 		s += theme.Err.Render("  "+m.err.Error()) + "\n"
 	}
 	return tea.NewView(s)
+}
+
+func (m *model) renderFile() string {
+	if m.fp == nil {
+		return ""
+	}
+	path := m.fp.Path
+	if path != "" {
+		return "  " + theme.Key.Render("▸ ") + "selected: " + theme.Value.Render(path) + "\n"
+	}
+	return "  " + strings.ReplaceAll(m.fp.View(), "\n", "\n  ") + "\n"
 }
 
 func (m *model) renderChoices() string {
@@ -267,4 +353,17 @@ func (m *model) renderChoices() string {
 	}
 	s += theme.MutedText.Render("  ↑/↓ select · enter confirm · esc cancel") + "\n"
 	return s
+}
+
+// titleCase capitalises the first letter of each word.
+func titleCase(s string) string {
+	prev := ' '
+	return strings.Map(func(r rune) rune {
+		if prev == ' ' || prev == '-' {
+			prev = r
+			return unicode.ToUpper(r)
+		}
+		prev = r
+		return r
+	}, s)
 }
