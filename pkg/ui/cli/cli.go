@@ -252,7 +252,7 @@ func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 
 // bindFields wires registry.Field -> cobra flags that write into the Input map.
 func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input, g *Globals) {
-	cliName := rootName(c)
+	cliName := g.cliName
 	// Storage for each flag's string value. We keep them in a slice so
 	// each closure captures its own pointer.
 	vals := make([]*string, len(fields))
@@ -290,16 +290,6 @@ func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input, g 
 		}
 		return nil
 	}
-}
-
-// rootName walks up to the root cobra command and returns its Use field —
-// the CLI name passed to Build(). Used to derive env-var names for flags
-// bound below the root.
-func rootName(c *cobra.Command) string {
-	for c.HasParent() {
-		c = c.Parent()
-	}
-	return c.Use
 }
 
 // envOr returns the value of <CLINAME>_<FLAG> if set in getenv, else fallback.
