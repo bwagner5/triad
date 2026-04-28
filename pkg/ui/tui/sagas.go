@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"reflect"
 
@@ -49,7 +50,7 @@ func (a *app) launchOp(res *registry.Resource, op *registry.Operation, input reg
 			return a.showToast(toastErr, err.Error())
 		}
 	}
-	missing := missingRequired(op.Fields, input)
+	missing := missingFields(op.Fields, input)
 	resName := ""
 	if res != nil {
 		resName = res.Name
@@ -114,11 +115,20 @@ func (a *app) startSaga(msg startSagaMsg) tea.Cmd {
 	return readSagaCmd(ch)
 }
 
-// missingRequired returns fields whose input is not yet provided.
-func missingRequired(fields []registry.Field, in registry.Input) []registry.Field {
+// missingFields returns fields whose input is not yet provided.
+// Includes both required and optional fields so the wizard can prompt
+// for everything the operation accepts. Fields with Wizard:false are
+// excluded and their Default (if any) is applied to Input automatically.
+func missingFields(fields []registry.Field, in registry.Input) []registry.Field {
 	var out []registry.Field
 	for _, f := range fields {
-		if !f.Required {
+		// Hidden from wizard: auto-apply default and skip.
+		if f.Wizard != nil && !*f.Wizard {
+			if f.Default != nil {
+				if _, ok := in[f.Flag]; !ok || in[f.Flag] == "" {
+					in[f.Flag] = fmt.Sprintf("%v", f.Default)
+				}
+			}
 			continue
 		}
 		if v, ok := in[f.Flag]; ok && v != "" {

@@ -10,10 +10,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/runtime"
@@ -87,6 +89,10 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 	}
 	root.SetErrPrefix(theme.Err.Render("error:"))
 	root.SetVersionTemplate("{{.Version}}\n")
+
+	// Move --help to global (persistent) flags. Cobra skips adding a
+	// local --help when a persistent one already exists.
+	root.PersistentFlags().BoolP("help", "h", false, "help for this command")
 
 	// Every persistent flag honors <CLINAME>_<FLAG> as an env-var fallback.
 	ge := g.getenv
@@ -243,6 +249,11 @@ func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
 				return err
 			}
+			if g.Interactive() {
+				return runWithSpinner(cmd.Context(), op.Short, func(ctx context.Context) error {
+					return op.Run(ctx, in)
+				})
+			}
 			return op.Run(cmd.Context(), in)
 		},
 	}
@@ -325,7 +336,7 @@ func envHelp(cliName, flag, help string) string {
 // CompleteInput validates required fields, launching the prompter when missing.
 // If prompter is nil and interactive is true, the default wizard is used.
 func CompleteInput(ctx context.Context, fields []registry.Field, in registry.Input, interactive bool, prompter Prompter) error {
-	missing := []registry.Field{}
+	var missing []registry.Field
 	for _, f := range fields {
 		if v, ok := in[f.Flag]; ok && v != "" {
 			if f.Validate != nil {
@@ -335,20 +346,26 @@ func CompleteInput(ctx context.Context, fields []registry.Field, in registry.Inp
 			}
 			continue
 		}
-		if f.Required {
-			missing = append(missing, f)
+		// Hidden from wizard: auto-apply default and skip.
+		if f.Wizard != nil && !*f.Wizard {
+			if f.Default != nil {
+				in[f.Flag] = fmt.Sprintf("%v", f.Default)
+			}
+			continue
 		}
+		missing = append(missing, f)
 	}
 	if len(missing) == 0 {
 		return nil
 	}
 	if !interactive {
 		// Non-interactive: apply defaults to satisfy missing fields.
+		// Only error on required fields that have no default.
 		var stillMissing []string
 		for _, f := range missing {
 			if f.Default != nil {
 				in[f.Flag] = fmt.Sprintf("%v", f.Default)
-			} else {
+			} else if f.Required {
 				stillMissing = append(stillMissing, "--"+f.Flag)
 			}
 		}
@@ -369,4 +386,56 @@ func streamOp(ctx context.Context, w io.Writer, res registry.Resource, op regist
 		return RenderEventsLive(ch)
 	}
 	return RenderEvents(w, ch)
+}
+
+// runWithSpinner shows an inline spinner while fn executes. Used for
+// simple Run actions (status, logs) in interactive CLI mode.
+func runWithSpinner(ctx context.Context, label string, fn func(context.Context) error) error {
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+	// Capture stdout so fn's output doesn't collide with the spinner.
+	origStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		return fn(ctx) // fallback: no spinner
+	}
+	os.Stdout = w
+
+	var buf bytes.Buffer
+	copyDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(&buf, r)
+		close(copyDone)
+	}()
+
+	// Spinner on stderr.
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		i := 0
+		for {
+			select {
+			case <-stop:
+				fmt.Fprintf(os.Stderr, "\r\033[K")
+				return
+			default:
+				fmt.Fprintf(os.Stderr, "\r%s %s", frames[i%len(frames)], label+"…")
+				i++
+				time.Sleep(80 * time.Millisecond)
+			}
+		}
+	}()
+
+	fnErr := fn(ctx)
+
+	// Stop spinner, restore stdout, flush captured output.
+	close(stop)
+	<-stopped
+	w.Close()
+	os.Stdout = origStdout
+	<-copyDone
+	_, _ = origStdout.Write(buf.Bytes())
+
+	return fnErr
 }

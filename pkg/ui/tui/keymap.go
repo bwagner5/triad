@@ -10,9 +10,21 @@ import (
 
 // needsSelection returns true when an operation acts on an existing resource
 // (i.e. at least one field uses Suggest to pick from existing items).
-func needsSelection(op registry.Operation) bool {
+func needsSelection(res registry.Resource, op registry.Operation) bool {
+	// An operation "needs selection" when it acts on an existing resource
+	// — i.e., it has a Suggest field whose flag matches the resource's
+	// primary key (first table field). Operations like "create" have
+	// Suggest fields for picking blueprints/bundles but don't select an
+	// existing resource, so they should NOT pre-populate from the table.
+	pk := ""
+	for _, f := range res.Fields {
+		if f.Table.Header != "" {
+			pk = f.Flag
+			break
+		}
+	}
 	for _, f := range op.Fields {
-		if f.Suggest != nil {
+		if f.Flag == pk && f.Suggest != nil {
 			return true
 		}
 	}
@@ -75,11 +87,17 @@ func (a *app) keyMap() []binding {
 			if op.Key == "" {
 				continue
 			}
+			// Skip operations disabled for the currently selected item.
+			if op.Enabled != nil && len(a.items) > 0 && a.cursor < len(a.items) {
+				if !op.Enabled(a.items[a.cursor]) {
+					continue
+				}
+			}
 			bs = append(bs, binding{
 				Key: op.Key, Label: op.Name, Cat: "Resource",
 				Run: func(a *app) (tea.Model, tea.Cmd) {
 					var input registry.Input
-					if needsSelection(op) {
+					if needsSelection(*a.resource, op) {
 						input = a.selectedInput()
 					}
 					return a, a.launchOp(a.resource, &op, input)

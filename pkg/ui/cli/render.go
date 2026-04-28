@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"time"
 
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
+	"github.com/bwagner5/triad/pkg/duration"
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/runtime"
 	"github.com/bwagner5/triad/pkg/ui/theme"
@@ -44,11 +46,18 @@ func renderTable(w io.Writer, res registry.Resource, items []any, wide bool) err
 		fields = append(fields, f)
 	}
 	var rows [][]string
+	now := time.Now()
 	for _, it := range items {
 		row := make([]string, len(fields))
 		rv := reflect.Indirect(reflect.ValueOf(it))
 		for i, f := range fields {
-			row[i] = fieldString(rv, f)
+			val := fieldString(rv, f)
+			if f.Table.Tick && val != "" {
+				if t, err := time.Parse(time.RFC3339, val); err == nil {
+					val = duration.Short(now.Sub(t))
+				}
+			}
+			row[i] = val
 		}
 		rows = append(rows, row)
 	}
@@ -135,7 +144,7 @@ func RenderEvents(w io.Writer, ch <-chan runtime.Event) error {
 		case runtime.Failed:
 			_, _ = fmt.Fprintf(w, "%s %s — %s\n", theme.ErrMark, e.Step, errStr(e.Err))
 		case runtime.Skipped:
-			_, _ = fmt.Fprintf(w, "%s %s (skipped)\n", theme.SkipMark, e.Step)
+			// don't show skipped steps
 		}
 	}
 	return finalErr

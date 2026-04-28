@@ -27,9 +27,10 @@ type liveModel struct {
 	ch    <-chan runtime.Event
 	sp    spinner.Model
 	steps []runtime.Event // latest state per step index
-	saga  string
-	done  bool
-	err   error
+	saga   string
+	done   bool
+	err    error
+	output string
 }
 
 type eventMsg runtime.Event
@@ -60,6 +61,7 @@ func (m *liveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if e.Done {
 			m.done = true
 			m.err = e.Err
+			m.output = e.Output
 			return m, waitEvent(m.ch)
 		}
 		for len(m.steps) <= e.Index {
@@ -112,7 +114,7 @@ func (m *liveModel) View() tea.View {
 		case runtime.Failed:
 			mark = theme.ErrMark
 		case runtime.Skipped:
-			mark = theme.SkipMark
+			continue // don't show skipped steps
 		}
 		label := e.Step
 		if e.Status == runtime.Failed && e.Err != nil {
@@ -125,6 +127,9 @@ func (m *liveModel) View() tea.View {
 			s += theme.Err.Render("✗ "+m.saga+" failed: "+m.err.Error()) + "\n"
 		} else {
 			s += theme.OK.Render("✓ "+m.saga+" complete") + "\n"
+			if m.output != "" {
+				s += "\n" + m.output + "\n"
+			}
 		}
 	}
 	return tea.NewView(s)

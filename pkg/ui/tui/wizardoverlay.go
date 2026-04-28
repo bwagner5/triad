@@ -488,13 +488,33 @@ func (wo *wizardOverlay) Box(w, h int) string {
 		if f.Required {
 			label += theme.Err.Render(" *")
 		}
+
+		// Unfocused fields collapse to label + current value (one line).
+		if !focused {
+			val := wo.fieldValue(i)
+			if val == "" {
+				val = theme.MutedText.Render("—")
+			}
+			body.WriteString("  " + label + "  " + val + "\n")
+			if wo.errs[i] != "" {
+				body.WriteString("  " + theme.Err.Render(wo.errs[i]) + "\n")
+			}
+			continue
+		}
+
 		body.WriteString("  " + label + "\n")
+
+		// Cap choice lists to fit the terminal.
+		maxChoices := h - len(wo.fields) - 8 // room for other fields + chrome
+		if maxChoices < 5 {
+			maxChoices = 5
+		}
 
 		switch {
 		case wo.isSelect(i) && wo.loading[i]:
 			body.WriteString("  " + wo.spin.View() + " " + theme.MutedText.Render("loading…") + "\n")
 		case wo.isSelect(i):
-			body.WriteString(wo.renderChoices(i, focused))
+			body.WriteString(wo.renderChoices(i, focused, maxChoices))
 		case wo.isFile(i):
 			body.WriteString(wo.renderFile(i, focused))
 		default:
@@ -539,14 +559,34 @@ func (wo *wizardOverlay) renderFile(fieldIdx int, focused bool) string {
 	return marker + "selected: " + path + inner
 }
 
-func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool) string {
+func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool, maxVisible int) string {
 	cs := wo.choices[fieldIdx]
 	if len(cs) == 0 {
 		return "  " + theme.MutedText.Render("(no options)") + "\n"
 	}
 	sel := wo.selIdx[fieldIdx]
+
+	// Compute scroll window around the selected item.
+	start, end := 0, len(cs)
+	if len(cs) > maxVisible {
+		half := maxVisible / 2
+		start = sel - half
+		if start < 0 {
+			start = 0
+		}
+		end = start + maxVisible
+		if end > len(cs) {
+			end = len(cs)
+			start = end - maxVisible
+		}
+	}
+
 	var s strings.Builder
-	for i, c := range cs {
+	if start > 0 {
+		s.WriteString("    " + theme.MutedText.Render(fmt.Sprintf("↑ %d more", start)) + "\n")
+	}
+	for i := start; i < end; i++ {
+		c := cs[i]
 		marker := "    "
 		line := c.Display
 		if line == "" {
@@ -564,6 +604,9 @@ func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool) string {
 			}
 		}
 		s.WriteString(marker + line + "\n")
+	}
+	if end < len(cs) {
+		s.WriteString("    " + theme.MutedText.Render(fmt.Sprintf("↓ %d more", len(cs)-end)) + "\n")
 	}
 	return s.String()
 }

@@ -56,6 +56,7 @@ type model struct {
 	choices   []registry.Choice
 	selIdx    int      // cursor for selection list
 	committed []string // rendered lines for previously-answered fields
+	termH     int      // terminal height for scroll capping
 
 	err      error
 	canceled bool
@@ -201,6 +202,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "esc":
 			m.canceled = true
 			return m, tea.Quit
+		case "tab":
+			// Tab skips optional fields.
+			if m.curField() != nil && !m.curField().Required {
+				return m, m.commitAndAdvance("")
+			}
 		case "enter":
 			if m.curField() == nil {
 				return m, tea.Quit
@@ -269,6 +275,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
+	case tea.WindowSizeMsg:
+		m.termH = msg.Height
+		return m, nil
 	}
 	if !m.isSelect() && !m.isFile() {
 		var cmd tea.Cmd
@@ -337,7 +346,33 @@ func (m *model) renderChoices() string {
 	if m.choices[0].Help != "" {
 		s += "  " + theme.Label.Render(m.choices[0].Help) + "\n"
 	}
-	for i, c := range m.choices {
+	// Cap visible choices to fit the terminal with a scroll window.
+	maxVisible := len(m.choices)
+	if m.termH > 0 {
+		// Reserve lines for: committed fields, label, header, hint, padding.
+		maxVisible = m.termH - len(m.committed) - 4
+		if maxVisible < 5 {
+			maxVisible = 5
+		}
+	}
+	start, end := 0, len(m.choices)
+	if len(m.choices) > maxVisible {
+		half := maxVisible / 2
+		start = m.selIdx - half
+		if start < 0 {
+			start = 0
+		}
+		end = start + maxVisible
+		if end > len(m.choices) {
+			end = len(m.choices)
+			start = end - maxVisible
+		}
+	}
+	if start > 0 {
+		s += theme.MutedText.Render(fmt.Sprintf("  ↑ %d more", start)) + "\n"
+	}
+	for i := start; i < end; i++ {
+		c := m.choices[i]
 		line := c.Display
 		if line == "" {
 			line = c.Value
@@ -351,7 +386,14 @@ func (m *model) renderChoices() string {
 			s += "  " + line + "\n"
 		}
 	}
-	s += theme.MutedText.Render("  ↑/↓ select · enter confirm · esc cancel") + "\n"
+	if end < len(m.choices) {
+		s += theme.MutedText.Render(fmt.Sprintf("  ↓ %d more", len(m.choices)-end)) + "\n"
+	}
+	hint := "  ↑/↓ select · enter confirm · esc cancel"
+	if f := m.curField(); f != nil && !f.Required {
+		hint = "  ↑/↓ select · enter confirm · tab skip · esc cancel"
+	}
+	s += theme.MutedText.Render(hint) + "\n"
 	return s
 }
 

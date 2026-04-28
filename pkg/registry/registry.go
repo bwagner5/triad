@@ -31,6 +31,10 @@ type Choice struct {
 type TableHint struct {
 	Header string
 	Wide   bool // only shown in -o wide
+	// Tick marks a field as a live duration ticker. The field value must
+	// be an RFC3339 timestamp; the TUI renders it as a relative duration
+	// (e.g. "5m", "2h") that updates every second without a full refresh.
+	Tick bool
 }
 
 // Field describes a single input / column of a resource.
@@ -59,6 +63,11 @@ type Field struct {
 	AllowedExts []string
 	Sensitive   bool
 	Table       TableHint
+	// Wizard controls whether the field appears in the interactive wizard.
+	// Defaults to true (shown). Set to false for system fields (e.g.
+	// auto-resolved region, tuning knobs) that should not be prompted.
+	// Hidden fields with a Default get it applied to Input automatically.
+	Wizard *bool
 	// Validate is called on the raw string form after parsing.
 	Validate func(value string) error
 	// Suggest returns dynamic choices (e.g. from a backend). May block;
@@ -69,6 +78,9 @@ type Field struct {
 // Input is the parsed user input for an operation.
 // It's a simple string-keyed map so every UI can produce/consume it.
 type Input map[string]string
+
+// BoolPtr returns a pointer to b. Convenience for Field.Wizard.
+func BoolPtr(b bool) *bool { return &b }
 
 // Get returns the value for key k, or "" if not set.
 func (i Input) Get(k string) string { return i[k] }
@@ -149,8 +161,9 @@ type Batch struct {
 // State is passed between saga steps. Input is the user's parsed input;
 // Data is a scratchpad steps can write to (e.g. a created ID for later steps).
 type State struct {
-	Input Input
-	Data  map[string]any
+	Input  Input
+	Data   map[string]any
+	Output string // optional summary shown after saga completion
 }
 
 // Step is one unit of work in a Saga.
@@ -201,6 +214,11 @@ type Operation struct {
 	// for fields still empty afterwards. Returning an error aborts the op
 	// before any prompting or step execution.
 	Pre func(ctx context.Context, in Input) error
+	// Enabled, when set, controls whether the operation is available for
+	// the currently selected item. Receives the selected row (same type
+	// returned by Store.List). Return false to hide the key binding and
+	// grey it out in help. Nil means always enabled.
+	Enabled func(item any) bool
 }
 
 // Resource is the central declaration that drives all three UIs.

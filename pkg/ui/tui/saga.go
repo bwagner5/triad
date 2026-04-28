@@ -13,9 +13,10 @@ import (
 type sagaOverlay struct {
 	active bool
 	name   string
-	events []runtime.Event // latest event per step index
+	events []runtime.Event
 	done   bool
 	err    error
+	output string
 	w, h   int
 }
 
@@ -41,6 +42,7 @@ func (s *sagaOverlay) Push(e runtime.Event) {
 	if e.Done {
 		s.done = true
 		s.err = e.Err
+		s.output = e.Output
 		return
 	}
 	// Update the slot at e.Index (grow slice as needed).
@@ -83,7 +85,7 @@ func (s *sagaOverlay) Box(w, _ int, spinnerFrame string) string {
 		case runtime.Failed:
 			mark = theme.ErrMark
 		case runtime.Skipped:
-			mark = theme.SkipMark
+			continue // don't show skipped steps
 		}
 		lines += fmt.Sprintf("  %s %s\n", mark, e.Step)
 	}
@@ -93,6 +95,9 @@ func (s *sagaOverlay) Box(w, _ int, spinnerFrame string) string {
 			lines += theme.Err.Render("✗ failed: "+s.err.Error()) + "\n"
 		} else {
 			lines += theme.OK.Render("✓ complete") + "\n"
+			if s.output != "" {
+				lines += "\n" + s.output + "\n"
+			}
 		}
 		lines += "\n" + theme.MutedText.Render("press esc or enter to close")
 	}

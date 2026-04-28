@@ -54,6 +54,9 @@ type Event struct {
 	Err      error
 	At       time.Time
 	Done     bool // true on the final event
+	// Output is an optional summary shown after saga completion.
+	// Populated by the last step to surface results (e.g. URLs).
+	Output string
 
 	// ---- NeedsInput payload ----
 	// Needs is populated when Status == NeedsInput. The consumer renders a
@@ -118,7 +121,7 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 			}
 			ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: OK, At: time.Now()}
 		}
-		final := Event{Saga: op.Name, Resource: res.Name, Index: -1, Total: total, Status: OK, At: time.Now(), Done: true}
+		final := Event{Saga: op.Name, Resource: res.Name, Index: -1, Total: total, Status: OK, At: time.Now(), Done: true, Output: st.Output}
 		if runErr != nil {
 			final.Status = Failed
 			final.Err = runErr

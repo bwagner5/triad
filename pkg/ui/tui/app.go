@@ -425,6 +425,8 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			a.mode = modeList
 			a.cursor = 0
 			a.filterText = ""
+			a.items = nil
+			a.initialLoad = true
 			return a, a.refresh()
 		}
 	}
@@ -982,11 +984,18 @@ func (a *app) renderTable(items []any, maxRows, maxW int) string {
 	}
 	var rows [][]string
 	cursorRow := -1
+	now := time.Now()
 	for i := start; i < end; i++ {
 		rv := reflectIndirect(items[i])
 		row := make([]string, len(fields))
 		for j, f := range fields {
-			row[j] = readField(rv, f)
+			val := readField(rv, f)
+			if f.Table.Tick && val != "" {
+				if t, err := time.Parse(time.RFC3339, val); err == nil {
+					val = duration.Short(now.Sub(t))
+				}
+			}
+			row[j] = val
 		}
 		if i == a.cursor {
 			cursorRow = i - start
