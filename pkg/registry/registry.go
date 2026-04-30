@@ -55,6 +55,12 @@ type Field struct {
 	// Section do not repeat the header. Use to group related fields
 	// (e.g. "Lightsail Application", "Deployment Target").
 	Section string
+	// Preamble is a multi-line text block printed verbatim immediately
+	// above the prompt for this field. Useful for fields whose context
+	// requires more than a single label, such as a confirm step that
+	// wants to show a grouped summary. Rendered only in interactive
+	// mode; ignored in non-interactive callers.
+	Preamble string
 	// When, if set, is evaluated each time the wizard is about to prompt
 	// for this field. Returning false skips the field (as if it had a
 	// Default). Use for fields whose presence depends on previous

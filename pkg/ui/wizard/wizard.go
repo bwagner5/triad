@@ -58,14 +58,15 @@ type model struct {
 	idx    int
 	reason string // optional header printed once above the first prompt
 
-	ti        textinput.Model
-	fp        *filepicker.Model // non-nil when current field is File
-	spin      spinner.Model
-	loading   bool
-	choices   []registry.Choice
-	selIdx    int      // cursor for selection list
-	committed []string // rendered lines for previously-answered fields
-	termH     int      // terminal height for scroll capping
+	ti                 textinput.Model
+	fp                 *filepicker.Model // non-nil when current field is File
+	spin               spinner.Model
+	loading            bool
+	choices            []registry.Choice
+	selIdx             int      // cursor for selection list
+	committed          []string // rendered lines for previously-answered fields
+	committedSections  []string // section name for each committed line (parallel)
+	termH              int      // terminal height for scroll capping
 
 	err      error
 	canceled bool
@@ -104,6 +105,16 @@ func (m *model) Init() tea.Cmd {
 
 // startField focuses the input and, if Suggest is set, kicks off a loader.
 func (m *model) startField() tea.Cmd {
+	// Skip fields whose When predicate returns false. Advance until
+	// we find a field to prompt for, or fall off the end.
+	for m.idx < len(m.fields) {
+		f := &m.fields[m.idx]
+		if f.When != nil && !f.When(m.in) {
+			m.idx++
+			continue
+		}
+		break
+	}
 	f := m.curField()
 	if f == nil {
 		return tea.Quit
@@ -196,6 +207,7 @@ func (m *model) commitAndAdvance(val string) tea.Cmd {
 	}
 	m.committed = append(m.committed,
 		fmt.Sprintf("%s %s: %s", theme.OKMark, theme.Label.Render(labelText), displayVal))
+	m.committedSections = append(m.committedSections, f.Section)
 	m.idx++
 	return m.startField()
 }
@@ -342,12 +354,36 @@ func (m *model) View() tea.View {
 		}
 		s += "\n"
 	}
-	for _, c := range m.committed {
+	// Render committed history, inserting a section header whenever
+	// consecutive entries come from different sections. Entries with
+	// an empty section are treated as "no section" and don't print a
+	// header.
+	prevSection := ""
+	for i, c := range m.committed {
+		sec := ""
+		if i < len(m.committedSections) {
+			sec = m.committedSections[i]
+		}
+		if sec != "" && sec != prevSection {
+			s += renderSectionHeader(sec) + "\n"
+		}
+		prevSection = sec
 		s += c + "\n"
 	}
 	f := m.curField()
 	if f == nil {
 		return tea.NewView(s)
+	}
+	// Section header for the current field, if this starts a new group.
+	if f.Section != "" && f.Section != prevSection {
+		s += renderSectionHeader(f.Section) + "\n"
+	}
+	// Preamble (multi-line verbatim text block).
+	if f.Preamble != "" {
+		s += f.Preamble
+		if !strings.HasSuffix(f.Preamble, "\n") {
+			s += "\n"
+		}
 	}
 	// Label: use title-cased Help (e.g. "App Name") when available,
 	// falling back to a humanized flag name (strips __ns/ prefixes).
@@ -373,6 +409,20 @@ func (m *model) View() tea.View {
 		s += theme.Err.Render("  "+m.err.Error()) + "\n"
 	}
 	return tea.NewView(s)
+}
+
+// renderSectionHeader returns a colourful, lightly-decorated header
+// line for a wizard section. Format: "━━ Title ━━────────" with the
+// accent color on the title and muted rule characters around it.
+// Blank line above for breathing room.
+func renderSectionHeader(title string) string {
+	const ruleLeft = "━━ "
+	const ruleRight = " "
+	rest := strings.Repeat("─", 48)
+	return "\n" + theme.Key.Render(ruleLeft) +
+		theme.Heading.Render(title) +
+		theme.Key.Render(ruleRight) +
+		theme.MutedText.Render(rest)
 }
 
 func (m *model) renderFile() string {
