@@ -61,6 +61,12 @@ type Field struct {
 	// wants to show a grouped summary. Rendered only in interactive
 	// mode; ignored in non-interactive callers.
 	Preamble string
+	// PreambleFunc is the dynamic variant of Preamble: evaluated each
+	// time the wizard is about to prompt for this field, with the
+	// already-collected Input. Returned string is rendered verbatim.
+	// Used for confirm-style fields whose summary depends on answers
+	// to earlier fields.
+	PreambleFunc func(in Input) string
 	// When, if set, is evaluated each time the wizard is about to prompt
 	// for this field. Returning false skips the field (as if it had a
 	// Default). Use for fields whose presence depends on previous

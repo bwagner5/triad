@@ -378,10 +378,16 @@ func (m *model) View() tea.View {
 	if f.Section != "" && f.Section != prevSection {
 		s += renderSectionHeader(f.Section) + "\n"
 	}
-	// Preamble (multi-line verbatim text block).
-	if f.Preamble != "" {
-		s += f.Preamble
-		if !strings.HasSuffix(f.Preamble, "\n") {
+	// Preamble (multi-line verbatim text block). Dynamic variant
+	// takes precedence so callers can pass a function computed from
+	// the current Input (e.g. a review-and-confirm summary).
+	preamble := f.Preamble
+	if f.PreambleFunc != nil {
+		preamble = f.PreambleFunc(m.in)
+	}
+	if preamble != "" {
+		s += preamble
+		if !strings.HasSuffix(preamble, "\n") {
 			s += "\n"
 		}
 	}
