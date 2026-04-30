@@ -325,6 +325,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.choices = msg.choices
+		// Seed cursor to the saved answer if the current field's
+		// Value matches one of the loaded choices. Matches the
+		// text-input seeding (Input > Prefill > Default) so a
+		// resumed wizard starts with the prior pick highlighted.
+		if f := m.curField(); f != nil {
+			want := m.in[f.Flag]
+			if want == "" && f.Prefill != nil {
+				want = f.Prefill()
+			}
+			if want == "" && f.Default != nil {
+				want = fmt.Sprintf("%v", f.Default)
+			}
+			if want != "" {
+				for i, c := range m.choices {
+					if c.Value == want {
+						m.selIdx = i
+						break
+					}
+				}
+			}
+		}
 		return m, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
