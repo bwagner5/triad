@@ -42,8 +42,24 @@ type Field struct {
 	Name     string // struct field path (informational)
 	Flag     string // e.g. "name"
 	Short    string // e.g. "n"
+	// Label is the short, user-facing name shown above the wizard
+	// prompt and in the committed input history (e.g. "App name").
+	// When empty the wizard falls back to a title-cased Flag. Help is
+	// reserved for help text (shown as placeholder) and should not be
+	// used as a label.
+	Label    string
 	Help     string
 	Required bool
+	// Section, when non-empty, causes the wizard to print a header line
+	// above this field before prompting. Subsequent fields with the same
+	// Section do not repeat the header. Use to group related fields
+	// (e.g. "Lightsail Application", "Deployment Target").
+	Section string
+	// When, if set, is evaluated each time the wizard is about to prompt
+	// for this field. Returning false skips the field (as if it had a
+	// Default). Use for fields whose presence depends on previous
+	// answers in the same wizard run.
+	When func(in Input) bool
 	// Default sets a static pre-filled value. The wizard still prompts
 	// for the field but seeds the input with this value so the user can
 	// press Enter to accept or type to override. In non-interactive

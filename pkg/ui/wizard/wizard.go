@@ -200,11 +200,20 @@ func (m *model) commitAndAdvance(val string) tea.Cmd {
 	return m.startField()
 }
 
-// fieldDisplayLabel returns the user-facing label for f. Prefers
-// title-cased Help (matches the live prompt label); falls back to a
-// cleaned-up flag name with any internal prefix stripped.
+// fieldDisplayLabel returns the user-facing label for f. Preference
+// order: explicit Label > title-cased Help (when it's short and
+// label-shaped) > cleaned-up flag name with any internal prefix
+// stripped. Help is reserved for placeholder/help text and is only
+// used as a label fallback when nothing better is set.
 func fieldDisplayLabel(f *registry.Field) string {
-	if f.Help != "" {
+	if f.Label != "" {
+		return f.Label
+	}
+	// Heuristic: if Help is short (single short phrase), it was
+	// historically used as a label and we keep that behavior. Long
+	// help strings (e.g. a sentence describing the flag's effect)
+	// fall through to the flag-derived label.
+	if f.Help != "" && len(f.Help) <= 40 && !strings.ContainsAny(f.Help, ";.") {
 		return titleCase(f.Help)
 	}
 	// Strip a leading namespace segment (e.g. "__ni/name" -> "name")
