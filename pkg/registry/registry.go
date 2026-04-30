@@ -288,6 +288,27 @@ type Step struct {
 	Skip  func(s *State) bool                       // optional
 }
 
+// DetailView is an optional structured representation of one resource item.
+// TUI renderers can use it to show richer detail panes than the generic
+// field-by-field fallback.
+type DetailView struct {
+	Sections []DetailSection
+}
+
+// DetailSection groups related body text and label/value rows.
+type DetailSection struct {
+	Title string
+	Body  string
+	Rows  []DetailRow
+}
+
+// DetailRow is one label/value pair in a DetailSection.
+type DetailRow struct {
+	Label     string
+	Value     string
+	Sensitive bool
+}
+
 // Operation is a named verb on a resource.
 //
 // An Operation with Steps is a multi-step workflow: the runtime executes each
@@ -347,6 +368,9 @@ type Resource struct {
 	Short   string
 	Fields  []Field // columns + common identifiers
 	Store   Store
+	// Detail, when set, renders an item-specific structured detail view.
+	// Returning an empty DetailView falls back to the generic field view.
+	Detail func(item any) DetailView
 	// Operations are the verbs available on this resource (create, delete,
 	// logs, etc.). Each operation surfaces automatically in the CLI, wizard,
 	// and TUI. Operations with Steps render as multi-step workflows;

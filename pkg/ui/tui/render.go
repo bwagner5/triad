@@ -24,6 +24,12 @@ func detailID(res *registry.Resource, item any) string {
 
 // detailFor renders a full field-by-field view of an item.
 func detailFor(res *registry.Resource, item any) string {
+	if res.Detail != nil {
+		view := res.Detail(item)
+		if len(view.Sections) > 0 {
+			return renderDetailView(view)
+		}
+	}
 	rv := reflect.Indirect(reflect.ValueOf(item))
 	var s strings.Builder
 	for _, f := range res.Fields {
@@ -36,6 +42,33 @@ func detailFor(res *registry.Resource, item any) string {
 			val = strings.Repeat("*", len(val))
 		}
 		fmt.Fprintf(&s, "%s %s\n", theme.Label.Render(name+":"), val)
+	}
+	return s.String()
+}
+
+func renderDetailView(view registry.DetailView) string {
+	var s strings.Builder
+	for i, section := range view.Sections {
+		if i > 0 {
+			s.WriteString("\n")
+		}
+		if section.Title != "" {
+			s.WriteString(theme.Heading.Render(section.Title))
+			s.WriteString("\n")
+		}
+		if section.Body != "" {
+			s.WriteString(section.Body)
+			if !strings.HasSuffix(section.Body, "\n") {
+				s.WriteString("\n")
+			}
+		}
+		for _, row := range section.Rows {
+			val := row.Value
+			if row.Sensitive {
+				val = strings.Repeat("*", len(val))
+			}
+			fmt.Fprintf(&s, "%s %s\n", theme.Label.Render(row.Label+":"), val)
+		}
 	}
 	return s.String()
 }
