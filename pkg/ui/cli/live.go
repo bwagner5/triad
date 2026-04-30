@@ -220,6 +220,14 @@ func (m *liveModel) View() tea.View {
 			label += " — " + theme.Err.Render(e.Err.Error())
 		}
 		b.WriteString(mark + " " + label + "\n")
+		// Per-step Output: indented detail lines shown under the
+		// step label. Used by steps that want to surface a result
+		// (e.g. created role ARN, bucket names, endpoints).
+		if e.Status == runtime.OK && e.Output != "" {
+			for _, ln := range strings.Split(strings.TrimRight(e.Output, "\n"), "\n") {
+				b.WriteString("    " + theme.MutedText.Render(ln) + "\n")
+			}
+		}
 	}
 
 	// Progress bar: only while the saga is in flight. Hidden on the

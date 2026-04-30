@@ -85,12 +85,22 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 		total := len(op.Steps)
 		var runErr error
 		var lastIdx int
+		// Track the final aggregate Output separately from per-step
+		// Output. Each step may set st.Output to describe its own
+		// result (e.g. "Role ARN: …"); we copy that into the OK
+		// event, then reset st.Output so the next step starts fresh.
+		// finalOutput accumulates the last non-empty step output for
+		// the Done event — matching the legacy behavior where a
+		// saga's final Output was whatever the last step left in
+		// state.
+		var finalOutput string
 		for i, step := range op.Steps {
 			lastIdx = i
 			if step.Skip != nil && step.Skip(st) {
 				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Skipped, At: time.Now()}
 				continue
 			}
+			st.Output = ""
 			// A step may return registry.NeedInput; the runtime pauses,
 			// asks the consumer for the listed fields, and retries the
 			// same step. Runs at most 8 times per step to prevent loops.
@@ -119,9 +129,13 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 				}
 				break
 			}
-			ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: OK, At: time.Now()}
+			stepOutput := st.Output
+			if stepOutput != "" {
+				finalOutput = stepOutput
+			}
+			ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: OK, Output: stepOutput, At: time.Now()}
 		}
-		final := Event{Saga: op.Name, Resource: res.Name, Index: -1, Total: total, Status: OK, At: time.Now(), Done: true, Output: st.Output}
+		final := Event{Saga: op.Name, Resource: res.Name, Index: -1, Total: total, Status: OK, At: time.Now(), Done: true, Output: finalOutput}
 		if runErr != nil {
 			final.Status = Failed
 			final.Err = runErr

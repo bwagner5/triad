@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bwagner5/triad/pkg/registry"
@@ -268,6 +269,15 @@ func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input, g 
 	// each closure captures its own pointer.
 	vals := make([]*string, len(fields))
 	for i, f := range fields {
+		// Fields whose Flag starts with "__" are internal: they exist
+		// only to drive the up-front wizard (e.g. namespaced sub-saga
+		// fields collected as part of a parent op). Don't bind them as
+		// cobra flags — they'd pollute --help and encourage callers to
+		// pass "--__ni/name" which reads as internal-implementation.
+		if strings.HasPrefix(f.Flag, "__") {
+			vals[i] = new(string) // keep slot for index alignment
+			continue
+		}
 		v := ""
 		if f.Default != nil {
 			v = fmt.Sprintf("%v", f.Default)
@@ -295,6 +305,9 @@ func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input, g 
 			}
 		}
 		for i, f := range fieldsCopy {
+			if strings.HasPrefix(f.Flag, "__") {
+				continue
+			}
 			if cmd.Flags().Changed(f.Flag) && *vals[i] != "" {
 				in[f.Flag] = *vals[i]
 			}
