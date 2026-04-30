@@ -24,7 +24,11 @@ type wizardExec struct {
 
 func (w *wizardExec) Run() error {
 	in := registry.Input{}
-	err := wizard.Collect(w.ctx, w.need.Fields, in)
+	reason := ""
+	if w.need != nil {
+		reason = w.need.Reason
+	}
+	err := wizard.CollectWithReason(w.ctx, reason, w.need.Fields, in)
 	if err != nil {
 		w.provide(nil) // abort
 		return err

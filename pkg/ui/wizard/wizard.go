@@ -24,10 +24,18 @@ import (
 // Collect prompts for each Field and writes answers into in.
 // Runs inline (no alt-screen) so output blends with the surrounding CLI.
 func Collect(ctx context.Context, fields []registry.Field, in registry.Input) error {
+	return CollectWithReason(ctx, "", fields, in)
+}
+
+// CollectWithReason is like Collect but prints reason above the first
+// prompt. reason may contain newlines; it's rendered verbatim so
+// callers can pre-format multi-section summaries.
+func CollectWithReason(ctx context.Context, reason string, fields []registry.Field, in registry.Input) error {
 	if len(fields) == 0 {
 		return nil
 	}
 	m := newModel(ctx, fields, in)
+	m.reason = reason
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 	finalModel, err := p.Run()
 	if err != nil {
@@ -48,6 +56,7 @@ type model struct {
 	fields []registry.Field
 	in     registry.Input
 	idx    int
+	reason string // optional header printed once above the first prompt
 
 	ti        textinput.Model
 	fp        *filepicker.Model // non-nil when current field is File
@@ -314,6 +323,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *model) View() tea.View {
 	var s string
+	if m.reason != "" {
+		// Prepend the reason block verbatim so callers can pre-format
+		// multi-section summaries. Theme the header lightly so the
+		// prompt itself stands out below it.
+		s += m.reason
+		if !strings.HasSuffix(m.reason, "\n") {
+			s += "\n"
+		}
+		s += "\n"
+	}
 	for _, c := range m.committed {
 		s += c + "\n"
 	}
