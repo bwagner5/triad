@@ -59,6 +59,32 @@ func TestWizardSeeding_Precedence(t *testing.T) {
 	}
 }
 
+func TestWizardOverlayTypedFieldWithSuggestUsesSelectMode(t *testing.T) {
+	wo := newWizardOverlay()
+	fields := []registry.Field{{
+		Flag: "enabled",
+		Kind: registry.KindBool,
+		Suggest: func(context.Context) ([]registry.Choice, error) {
+			return []registry.Choice{{Value: "true"}, {Value: "false"}}, nil
+		},
+	}}
+	_ = wo.Show(context.Background(), nil, &registry.Operation{Name: "test"}, fields, registry.Input{})
+
+	if !wo.isSelect(0) {
+		t.Fatal("typed field with Suggest should render as a selection list")
+	}
+}
+
+func TestWizardOverlayKindFileUsesFileMode(t *testing.T) {
+	wo := newWizardOverlay()
+	fields := []registry.Field{{Flag: "path", Kind: registry.KindFile}}
+	_ = wo.Show(context.Background(), nil, &registry.Operation{Name: "test"}, fields, registry.Input{})
+
+	if !wo.isFile(0) {
+		t.Fatal("KindFile should render as a file picker")
+	}
+}
+
 // TestConfirm_NavDoesNotDecide is the regression for 'Running confirm and
 // does nothing'. Pressing →/l/tab/h must flip the cursor but NOT drain
 // pendingProvide or dismiss the overlay.

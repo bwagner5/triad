@@ -90,13 +90,13 @@ func (m *model) curField() *registry.Field {
 // isSelect returns true when the current field should be rendered as a list.
 func (m *model) isSelect() bool {
 	f := m.curField()
-	return f != nil && f.Suggest != nil && f.EffectiveKind() == registry.KindChoice
+	return f != nil && f.Suggest != nil
 }
 
 // isFile returns true when the current field should be rendered as a file picker.
 func (m *model) isFile() bool {
 	f := m.curField()
-	return f != nil && f.EffectiveKind() == registry.KindFile
+	return f != nil && (f.File || f.EffectiveKind() == registry.KindFile)
 }
 
 func (m *model) Init() tea.Cmd {

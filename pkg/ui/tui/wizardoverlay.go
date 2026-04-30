@@ -68,7 +68,7 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *r
 
 	var cmds []tea.Cmd
 	for i, f := range fields {
-		if f.EffectiveKind() == registry.KindFile {
+		if f.File || f.EffectiveKind() == registry.KindFile {
 			fp := filepicker.New()
 			fp.AllowedTypes = f.AllowedExts
 			fp.ShowHidden = false
@@ -109,12 +109,12 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *r
 		}
 		wo.inputs[i] = ti
 
-		if f.Suggest != nil && f.EffectiveKind() == registry.KindChoice {
+		if f.Suggest != nil {
 			wo.loading[i] = true
 			cmds = append(cmds, wo.fetchSuggest(i, f))
 		}
 	}
-	cmds = append(cmds, wo.inputs[0].Focus(), wo.spin.Tick)
+	cmds = append(cmds, wo.focusField(0), wo.spin.Tick)
 	return tea.Batch(cmds...)
 }
 
@@ -129,11 +129,11 @@ func (wo *wizardOverlay) Clear() {
 }
 
 func (wo *wizardOverlay) isSelect(i int) bool {
-	return i < len(wo.fields) && wo.fields[i].Suggest != nil && wo.fields[i].EffectiveKind() == registry.KindChoice
+	return i < len(wo.fields) && wo.fields[i].Suggest != nil
 }
 
 func (wo *wizardOverlay) isFile(i int) bool {
-	return i < len(wo.fields) && wo.fields[i].EffectiveKind() == registry.KindFile
+	return i < len(wo.fields) && (wo.fields[i].File || wo.fields[i].EffectiveKind() == registry.KindFile)
 }
 
 type wizardSuggestMsg struct {
