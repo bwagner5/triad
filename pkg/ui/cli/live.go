@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/progress"
@@ -31,21 +32,33 @@ func RenderEventsLive(ch <-chan runtime.Event) error {
 }
 
 type liveModel struct {
-	ctx    context.Context
-	ch     <-chan runtime.Event
-	sp     spinner.Model
-	bar    progress.Model
-	steps  []runtime.Event // latest state per step index
-	total  int             // len(op.Steps) including skipped
-	saga   string
-	done   bool
-	err    error
-	output string
-	width  int
+	ctx       context.Context
+	ch        <-chan runtime.Event
+	sp        spinner.Model
+	bar       progress.Model
+	steps     []runtime.Event // latest state per step index
+	total     int             // len(op.Steps) including skipped
+	saga      string
+	done      bool
+	err       error
+	output    string
+	width     int
+	startedAt time.Time // first Running event's timestamp (drives ticker)
+	now       time.Time // latest tick (for elapsed rendering)
 }
 
 type eventMsg runtime.Event
 type closedMsg struct{}
+type tickMsg time.Time
+
+// tickEvery emits a tickMsg once per second. Used to drive the elapsed
+// ticker next to the progress bar without coupling it to the spinner's
+// higher-frequency ticks.
+func tickEvery() tea.Cmd {
+	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
 
 func waitEvent(ch <-chan runtime.Event) tea.Cmd {
 	return func() tea.Msg {
@@ -57,7 +70,9 @@ func waitEvent(ch <-chan runtime.Event) tea.Cmd {
 	}
 }
 
-func (m *liveModel) Init() tea.Cmd { return tea.Batch(m.sp.Tick, waitEvent(m.ch)) }
+func (m *liveModel) Init() tea.Cmd {
+	return tea.Batch(m.sp.Tick, waitEvent(m.ch), tickEvery())
+}
 
 func (m *liveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -66,6 +81,9 @@ func (m *liveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.saga = e.Saga
 		if e.Total > 0 {
 			m.total = e.Total
+		}
+		if m.startedAt.IsZero() && e.Status == runtime.Running {
+			m.startedAt = time.Now()
 		}
 		if e.Status == runtime.NeedsInput {
 			// Suspend the live renderer, run the inline wizard on the real
@@ -87,6 +105,12 @@ func (m *liveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitEvent(m.ch)
 	case closedMsg:
 		return m, tea.Quit
+	case tickMsg:
+		m.now = time.Time(msg)
+		if m.done {
+			return m, nil
+		}
+		return m, tickEvery()
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.sp, cmd = m.sp.Update(msg)
@@ -157,9 +181,9 @@ func (m *liveModel) progressCounts() (completed, total int) {
 func (m *liveModel) View() tea.View {
 	var b strings.Builder
 
-	// Header: saga title + "N / M" counter. Only shown once we've
-	// received at least one event so the very first frame doesn't
-	// flash an empty header.
+	// Header: saga title + "N / M" counter + elapsed time. Only shown
+	// once we've received at least one event so the very first frame
+	// doesn't flash an empty header.
 	if m.saga != "" {
 		completed, total := m.progressCounts()
 		title := "Deploying"
@@ -170,6 +194,9 @@ func (m *liveModel) View() tea.View {
 		if total > 0 {
 			header += "  " + theme.MutedText.Render(
 				fmt.Sprintf("%d / %d", completed, total))
+		}
+		if elapsed := m.elapsed(); elapsed != "" {
+			header += theme.MutedText.Render(" · " + elapsed)
 		}
 		b.WriteString(header + "\n\n")
 	}
@@ -196,12 +223,17 @@ func (m *liveModel) View() tea.View {
 	}
 
 	// Progress bar: only while the saga is in flight. Hidden on the
-	// final frame so the summary isn't visually crowded.
+	// final frame so the summary isn't visually crowded. The currently-
+	// running step's label is echoed under the bar so a user glancing
+	// at the screen always knows what's happening.
 	if m.saga != "" && !m.done {
 		completed, total := m.progressCounts()
 		if total > 0 {
 			pct := float64(completed) / float64(total)
 			b.WriteString("\n" + m.bar.ViewAs(pct) + "\n")
+		}
+		if cur := m.currentRunningStep(); cur != "" {
+			b.WriteString(theme.MutedText.Render("  working · "+cur) + "\n")
 		}
 	}
 
@@ -216,6 +248,37 @@ func (m *liveModel) View() tea.View {
 		}
 	}
 	return tea.NewView(b.String())
+}
+
+// elapsed returns the wall-clock time since the first Running event
+// arrived, formatted as MM:SS. Empty string until the saga actually
+// starts executing (no startedAt recorded yet).
+func (m *liveModel) elapsed() string {
+	if m.startedAt.IsZero() {
+		return ""
+	}
+	end := m.now
+	if end.IsZero() {
+		end = time.Now()
+	}
+	d := end.Sub(m.startedAt).Truncate(time.Second)
+	if d < 0 {
+		d = 0
+	}
+	min := int(d / time.Minute)
+	sec := int((d % time.Minute) / time.Second)
+	return fmt.Sprintf("%02d:%02d", min, sec)
+}
+
+// currentRunningStep returns the label of the step currently in the
+// Running state, or "" when nothing is running.
+func (m *liveModel) currentRunningStep() string {
+	for i := len(m.steps) - 1; i >= 0; i-- {
+		if m.steps[i].Status == runtime.Running {
+			return m.steps[i].Step
+		}
+	}
+	return ""
 }
 
 // cap1 turns saga names like "deploy" → "Deploying" feel: we accept the
