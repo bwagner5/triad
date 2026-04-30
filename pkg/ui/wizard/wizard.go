@@ -176,10 +176,35 @@ func (m *model) commitAndAdvance(val string) tea.Cmd {
 		}
 	}
 	m.in[f.Flag] = val
+	// Use the same title-cased Help text the live label rendered, so
+	// the committed history reads as "Instance Name: ancient-orbit"
+	// instead of exposing internal flag names like "__ni/name".
+	// Sensitive values are masked in the history too.
+	labelText := fieldDisplayLabel(f)
+	displayVal := val
+	if f.Sensitive {
+		displayVal = strings.Repeat("•", len(val))
+	}
 	m.committed = append(m.committed,
-		fmt.Sprintf("%s %s: %s", theme.OKMark, theme.Label.Render(f.Flag), val))
+		fmt.Sprintf("%s %s: %s", theme.OKMark, theme.Label.Render(labelText), displayVal))
 	m.idx++
 	return m.startField()
+}
+
+// fieldDisplayLabel returns the user-facing label for f. Prefers
+// title-cased Help (matches the live prompt label); falls back to a
+// cleaned-up flag name with any internal prefix stripped.
+func fieldDisplayLabel(f *registry.Field) string {
+	if f.Help != "" {
+		return titleCase(f.Help)
+	}
+	// Strip a leading namespace segment (e.g. "__ni/name" -> "name")
+	// so internal sub-saga prefixes don't leak into the user view.
+	flag := f.Flag
+	if i := strings.LastIndex(flag, "/"); i >= 0 && i+1 < len(flag) {
+		flag = flag[i+1:]
+	}
+	return titleCase(strings.ReplaceAll(flag, "-", " "))
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -297,12 +322,8 @@ func (m *model) View() tea.View {
 		return tea.NewView(s)
 	}
 	// Label: use title-cased Help (e.g. "App Name") when available,
-	// falling back to the flag name. Matches the TUI wizard's behavior
-	// of putting Help into the placeholder, not the label.
-	labelText := f.Flag
-	if f.Help != "" {
-		labelText = titleCase(f.Help)
-	}
+	// falling back to a humanized flag name (strips __ns/ prefixes).
+	labelText := fieldDisplayLabel(f)
 	label := theme.Label.Render(labelText)
 	if f.Required {
 		label += theme.Err.Render(" *")
