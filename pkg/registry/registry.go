@@ -16,8 +16,10 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Choice is a selectable option offered by Field.Suggest.
@@ -37,11 +39,25 @@ type TableHint struct {
 	Tick bool
 }
 
+// FieldKind describes how a field should be parsed and rendered by UIs.
+// KindString is the zero value so existing Field declarations keep their
+// current string behavior until they opt into a more specific kind.
+type FieldKind int
+
+const (
+	KindString FieldKind = iota
+	KindBool
+	KindDuration
+	KindFile
+	KindChoice
+)
+
 // Field describes a single input / column of a resource.
 type Field struct {
-	Name     string // struct field path (informational)
-	Flag     string // e.g. "name"
-	Short    string // e.g. "n"
+	Name  string // struct field path (informational)
+	Flag  string // e.g. "name"
+	Short string // e.g. "n"
+	Kind  FieldKind
 	// Label is the short, user-facing name shown above the wizard
 	// prompt and in the committed input history (e.g. "App name").
 	// When empty the wizard falls back to a title-cased Flag. Help is
@@ -103,6 +119,42 @@ type Field struct {
 	Suggest func(ctx context.Context) ([]Choice, error)
 }
 
+// EffectiveKind returns the field's explicit kind, preserving the existing
+// File/Suggest shortcuts for callers that have not adopted Field.Kind yet.
+func (f Field) EffectiveKind() FieldKind {
+	if f.Kind != KindString {
+		return f.Kind
+	}
+	if f.File {
+		return KindFile
+	}
+	if f.Suggest != nil {
+		return KindChoice
+	}
+	return KindString
+}
+
+// ValidateValue checks the field's built-in kind constraints, then runs the
+// custom validator when present.
+func (f Field) ValidateValue(value string) error {
+	if value != "" {
+		switch f.EffectiveKind() {
+		case KindBool:
+			if _, err := strconv.ParseBool(value); err != nil {
+				return fmt.Errorf("expected bool value true or false: %w", err)
+			}
+		case KindDuration:
+			if _, err := time.ParseDuration(value); err != nil {
+				return fmt.Errorf("expected duration like 30s, 5m, or 1h: %w", err)
+			}
+		}
+	}
+	if f.Validate != nil {
+		return f.Validate(value)
+	}
+	return nil
+}
+
 // Input is the parsed user input for an operation.
 // It's a simple string-keyed map so every UI can produce/consume it.
 type Input map[string]string
@@ -112,6 +164,40 @@ func BoolPtr(b bool) *bool { return &b }
 
 // Get returns the value for key k, or "" if not set.
 func (i Input) Get(k string) string { return i[k] }
+
+// StringDefault returns the input value for k, or def when k is unset/empty.
+func (i Input) StringDefault(k, def string) string {
+	if v := i.Get(k); v != "" {
+		return v
+	}
+	return def
+}
+
+// Bool parses k as a bool. Empty values return false with no error.
+func (i Input) Bool(k string) (bool, error) {
+	v := i.Get(k)
+	if v == "" {
+		return false, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s: expected bool value true or false: %w", k, err)
+	}
+	return b, nil
+}
+
+// Duration parses k as a Go duration. Empty values return 0 with no error.
+func (i Input) Duration(k string) (time.Duration, error) {
+	v := i.Get(k)
+	if v == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: expected duration like 30s, 5m, or 1h: %w", k, err)
+	}
+	return d, nil
+}
 
 // Has reports whether key k has been set (even if empty).
 func (i Input) Has(k string) bool { _, ok := i[k]; return ok }

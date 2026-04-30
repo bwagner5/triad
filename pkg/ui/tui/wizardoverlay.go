@@ -6,10 +6,10 @@ import (
 	"os"
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/filepicker"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/trace"
 	"github.com/bwagner5/triad/pkg/ui/theme"
@@ -68,7 +68,7 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *r
 
 	var cmds []tea.Cmd
 	for i, f := range fields {
-		if f.File {
+		if f.EffectiveKind() == registry.KindFile {
 			fp := filepicker.New()
 			fp.AllowedTypes = f.AllowedExts
 			fp.ShowHidden = false
@@ -109,7 +109,7 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *r
 		}
 		wo.inputs[i] = ti
 
-		if f.Suggest != nil {
+		if f.Suggest != nil && f.EffectiveKind() == registry.KindChoice {
 			wo.loading[i] = true
 			cmds = append(cmds, wo.fetchSuggest(i, f))
 		}
@@ -129,11 +129,11 @@ func (wo *wizardOverlay) Clear() {
 }
 
 func (wo *wizardOverlay) isSelect(i int) bool {
-	return i < len(wo.fields) && wo.fields[i].Suggest != nil
+	return i < len(wo.fields) && wo.fields[i].Suggest != nil && wo.fields[i].EffectiveKind() == registry.KindChoice
 }
 
 func (wo *wizardOverlay) isFile(i int) bool {
-	return i < len(wo.fields) && wo.fields[i].File
+	return i < len(wo.fields) && wo.fields[i].EffectiveKind() == registry.KindFile
 }
 
 type wizardSuggestMsg struct {
@@ -172,8 +172,8 @@ func (wo *wizardOverlay) submit() tea.Cmd {
 		if f.Required && val == "" {
 			wo.errs[i] = "required"
 			valid = false
-		} else if val != "" && f.Validate != nil {
-			if err := f.Validate(val); err != nil {
+		} else if val != "" {
+			if err := f.ValidateValue(val); err != nil {
 				wo.errs[i] = err.Error()
 				valid = false
 			}
@@ -214,10 +214,7 @@ func (wo *wizardOverlay) validateField(i int) error {
 		}
 		return nil
 	}
-	if f.Validate != nil {
-		return f.Validate(val)
-	}
-	return nil
+	return f.ValidateValue(val)
 }
 
 var errRequired = fmt.Errorf("required")

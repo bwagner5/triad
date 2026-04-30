@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,8 +84,8 @@ func (g *Globals) Interactive() bool { return !g.NonInteractive }
 func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Command {
 	g.cliName = rootUse
 	root := &cobra.Command{
-		Use:          rootUse,
-		Short:        short,
+		Use:           rootUse,
+		Short:         short,
 		SilenceUsage:  true,
 		SilenceErrors: true, // render errors ourselves; cobra would otherwise
 	}
@@ -265,9 +266,15 @@ func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 // bindFields wires registry.Field -> cobra flags that write into the Input map.
 func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input, g *Globals) {
 	cliName := g.cliName
-	// Storage for each flag's string value. We keep them in a slice so
-	// each closure captures its own pointer.
-	vals := make([]*string, len(fields))
+	type boundField struct {
+		stringVal   *string
+		boolVal     *bool
+		durationVal *time.Duration
+		defaultErr  error
+	}
+	// Storage for each flag value. We keep entries in a slice so each
+	// closure captures its own pointer.
+	vals := make([]boundField, len(fields))
 	for i, f := range fields {
 		// Fields whose Flag starts with "__" are internal: they exist
 		// only to drive the up-front wizard (e.g. namespaced sub-saga
@@ -275,7 +282,6 @@ func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input, g 
 		// cobra flags — they'd pollute --help and encourage callers to
 		// pass "--__ni/name" which reads as internal-implementation.
 		if strings.HasPrefix(f.Flag, "__") {
-			vals[i] = new(string) // keep slot for index alignment
 			continue
 		}
 		v := ""
@@ -292,8 +298,35 @@ func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input, g 
 			// CompleteInput.
 			in[f.Flag] = env
 		}
-		vals[i] = &v
-		c.Flags().StringVarP(vals[i], f.Flag, f.Short, v, envHelp(cliName, f.Flag, f.Help))
+		switch f.EffectiveKind() {
+		case registry.KindBool:
+			b := false
+			if v != "" {
+				parsed, err := strconv.ParseBool(v)
+				if err != nil {
+					vals[i].defaultErr = fmt.Errorf("--%s: %w", f.Flag, f.ValidateValue(v))
+				} else {
+					b = parsed
+				}
+			}
+			vals[i].boolVal = &b
+			c.Flags().BoolVarP(vals[i].boolVal, f.Flag, f.Short, b, envHelp(cliName, f.Flag, f.Help))
+		case registry.KindDuration:
+			d := time.Duration(0)
+			if v != "" {
+				parsed, err := time.ParseDuration(v)
+				if err != nil {
+					vals[i].defaultErr = fmt.Errorf("--%s: %w", f.Flag, f.ValidateValue(v))
+				} else {
+					d = parsed
+				}
+			}
+			vals[i].durationVal = &d
+			c.Flags().DurationVarP(vals[i].durationVal, f.Flag, f.Short, d, envHelp(cliName, f.Flag, f.Help))
+		default:
+			vals[i].stringVal = &v
+			c.Flags().StringVarP(vals[i].stringVal, f.Flag, f.Short, v, envHelp(cliName, f.Flag, f.Help))
+		}
 	}
 	// After parsing, copy non-empty flag values into Input.
 	prev := c.PreRunE
@@ -308,8 +341,19 @@ func bindFields(c *cobra.Command, fields []registry.Field, in registry.Input, g 
 			if strings.HasPrefix(f.Flag, "__") {
 				continue
 			}
-			if cmd.Flags().Changed(f.Flag) && *vals[i] != "" {
-				in[f.Flag] = *vals[i]
+			if cmd.Flags().Changed(f.Flag) {
+				switch {
+				case vals[i].boolVal != nil:
+					in[f.Flag] = strconv.FormatBool(*vals[i].boolVal)
+				case vals[i].durationVal != nil:
+					in[f.Flag] = vals[i].durationVal.String()
+				case vals[i].stringVal != nil && *vals[i].stringVal != "":
+					in[f.Flag] = *vals[i].stringVal
+				}
+				continue
+			}
+			if vals[i].defaultErr != nil {
+				return vals[i].defaultErr
 			}
 		}
 		return nil
@@ -352,17 +396,19 @@ func CompleteInput(ctx context.Context, fields []registry.Field, in registry.Inp
 	var missing []registry.Field
 	for _, f := range fields {
 		if v, ok := in[f.Flag]; ok && v != "" {
-			if f.Validate != nil {
-				if err := f.Validate(v); err != nil {
-					return fmt.Errorf("--%s: %w", f.Flag, err)
-				}
+			if err := f.ValidateValue(v); err != nil {
+				return fmt.Errorf("--%s: %w", f.Flag, err)
 			}
 			continue
 		}
 		// Hidden from wizard: auto-apply default and skip.
 		if f.Wizard != nil && !*f.Wizard {
 			if f.Default != nil {
-				in[f.Flag] = fmt.Sprintf("%v", f.Default)
+				v := fmt.Sprintf("%v", f.Default)
+				if err := f.ValidateValue(v); err != nil {
+					return fmt.Errorf("--%s: %w", f.Flag, err)
+				}
+				in[f.Flag] = v
 			}
 			continue
 		}
@@ -377,7 +423,11 @@ func CompleteInput(ctx context.Context, fields []registry.Field, in registry.Inp
 		var stillMissing []string
 		for _, f := range missing {
 			if f.Default != nil {
-				in[f.Flag] = fmt.Sprintf("%v", f.Default)
+				v := fmt.Sprintf("%v", f.Default)
+				if err := f.ValidateValue(v); err != nil {
+					return fmt.Errorf("--%s: %w", f.Flag, err)
+				}
+				in[f.Flag] = v
 			} else if f.Required {
 				stillMissing = append(stillMissing, "--"+f.Flag)
 			}
@@ -390,7 +440,17 @@ func CompleteInput(ctx context.Context, fields []registry.Field, in registry.Inp
 	if prompter == nil {
 		prompter = defaultPrompter
 	}
-	return prompter.Collect(ctx, missing, in)
+	if err := prompter.Collect(ctx, missing, in); err != nil {
+		return err
+	}
+	for _, f := range fields {
+		if v := in.Get(f.Flag); v != "" {
+			if err := f.ValidateValue(v); err != nil {
+				return fmt.Errorf("--%s: %w", f.Flag, err)
+			}
+		}
+	}
+	return nil
 }
 
 func streamOp(ctx context.Context, w io.Writer, res registry.Resource, op registry.Operation, in registry.Input, interactive bool) error {

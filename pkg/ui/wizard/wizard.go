@@ -13,10 +13,10 @@ import (
 	"strings"
 	"unicode"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/filepicker"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/ui/theme"
 )
@@ -58,15 +58,15 @@ type model struct {
 	idx    int
 	reason string // optional header printed once above the first prompt
 
-	ti                 textinput.Model
-	fp                 *filepicker.Model // non-nil when current field is File
-	spin               spinner.Model
-	loading            bool
-	choices            []registry.Choice
-	selIdx             int      // cursor for selection list
-	committed          []string // rendered lines for previously-answered fields
-	committedSections  []string // section name for each committed line (parallel)
-	termH              int      // terminal height for scroll capping
+	ti                textinput.Model
+	fp                *filepicker.Model // non-nil when current field is File
+	spin              spinner.Model
+	loading           bool
+	choices           []registry.Choice
+	selIdx            int      // cursor for selection list
+	committed         []string // rendered lines for previously-answered fields
+	committedSections []string // section name for each committed line (parallel)
+	termH             int      // terminal height for scroll capping
 
 	err      error
 	canceled bool
@@ -90,13 +90,13 @@ func (m *model) curField() *registry.Field {
 // isSelect returns true when the current field should be rendered as a list.
 func (m *model) isSelect() bool {
 	f := m.curField()
-	return f != nil && f.Suggest != nil
+	return f != nil && f.Suggest != nil && f.EffectiveKind() == registry.KindChoice
 }
 
 // isFile returns true when the current field should be rendered as a file picker.
 func (m *model) isFile() bool {
 	f := m.curField()
-	return f != nil && f.File
+	return f != nil && f.EffectiveKind() == registry.KindFile
 }
 
 func (m *model) Init() tea.Cmd {
@@ -124,13 +124,13 @@ func (m *model) startField() tea.Cmd {
 	m.selIdx = 0
 	m.choices = nil
 	m.err = nil
-	if f.Suggest != nil {
+	if m.isSelect() {
 		// Selection mode: hide text input, fetch choices with spinner.
 		m.ti.Blur()
 		m.loading = true
 		return m.fetchSuggest(*f)
 	}
-	if f.File {
+	if m.isFile() {
 		// File picker mode.
 		fp := filepicker.New()
 		fp.AllowedTypes = f.AllowedExts
@@ -189,11 +189,9 @@ func (m *model) commitAndAdvance(val string) tea.Cmd {
 	if f == nil {
 		return tea.Quit
 	}
-	if f.Validate != nil {
-		if err := f.Validate(val); err != nil {
-			m.err = err
-			return nil
-		}
+	if err := f.ValidateValue(val); err != nil {
+		m.err = err
+		return nil
 	}
 	m.in[f.Flag] = val
 	// Use the same title-cased Help text the live label rendered, so
@@ -503,7 +501,7 @@ func (m *model) renderChoices() string {
 		if line == "" {
 			line = c.Value
 			if c.Help != "" {
-				line += theme.MutedText.Render("  "+c.Help)
+				line += theme.MutedText.Render("  " + c.Help)
 			}
 		}
 		if i == m.selIdx {
