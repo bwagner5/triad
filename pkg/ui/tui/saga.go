@@ -11,13 +11,14 @@ import (
 
 // sagaOverlay shows live step progress for a running saga.
 type sagaOverlay struct {
-	active bool
-	name   string
-	events []runtime.Event
-	done   bool
-	err    error
-	output string
-	w, h   int
+	active    bool
+	name      string
+	events    []runtime.Event
+	done      bool
+	err       error
+	output    string
+	startedAt time.Time
+	w, h      int
 }
 
 func newSagaOverlay() sagaOverlay { return sagaOverlay{} }
@@ -32,6 +33,7 @@ func (s *sagaOverlay) Start(name string) {
 	s.events = nil
 	s.done = false
 	s.err = nil
+	s.startedAt = time.Now()
 }
 
 func (s *sagaOverlay) Push(e runtime.Event) {
@@ -65,7 +67,11 @@ func (s *sagaOverlay) DismissAfter() tea.Cmd {
 // spinner — passed in so the Running step shows live animation instead of
 // a static glyph (users read 'frozen glyph' as 'stuck').
 func (s *sagaOverlay) Box(w, _ int, spinnerFrame string) string {
-	header := theme.Heading.Render("Running: " + s.name)
+	elapsed := time.Since(s.startedAt).Truncate(time.Second)
+	header := theme.Heading.Render("Running: "+s.name) + "  " + theme.MutedText.Render(elapsed.String())
+	if s.done {
+		header = theme.Heading.Render(s.name) + "  " + theme.MutedText.Render(elapsed.String())
+	}
 	lines := header + "\n\n"
 	for _, e := range s.events {
 		// Skip empty slots. Push may grow the events slice when an

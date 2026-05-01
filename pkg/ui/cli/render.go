@@ -133,6 +133,9 @@ func RenderEvents(w io.Writer, ch <-chan runtime.Event) error {
 				finalErr = e.Err
 			} else {
 				fmt.Fprintln(w, theme.OK.Render("✓ ")+e.Saga+" complete") //nolint:errcheck
+				if e.Output != "" {
+					fmt.Fprintln(w, e.Output) //nolint:errcheck
+				}
 			}
 			continue
 		}

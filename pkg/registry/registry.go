@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // Choice is a selectable option offered by Field.Suggest.
@@ -132,6 +133,51 @@ func (f Field) EffectiveKind() FieldKind {
 		return KindChoice
 	}
 	return KindString
+}
+
+// DisplayLabel returns the user-facing label for f. Preference order:
+// explicit Label > title-cased Help (when it's short and label-shaped)
+// > cleaned-up flag name with any internal namespace prefix stripped
+// (e.g. "__ni/name" renders as "Name"). Help is reserved for
+// placeholder/help text and is only used as a label fallback when
+// nothing better is set.
+//
+// Both the interactive CLI wizard and the full-screen TUI wizard
+// overlay render prompts with this helper so internal sub-saga
+// prefixes like "__ni/" never leak into the UI.
+func (f Field) DisplayLabel() string {
+	if f.Label != "" {
+		return f.Label
+	}
+	// Heuristic: if Help is short (single short phrase), it was
+	// historically used as a label and we keep that behavior. Long
+	// help strings (e.g. a sentence describing the flag's effect)
+	// fall through to the flag-derived label.
+	if f.Help != "" && len(f.Help) <= 40 && !strings.ContainsAny(f.Help, ";.") {
+		return titleCaseLabel(f.Help)
+	}
+	// Strip a leading namespace segment (e.g. "__ni/name" -> "name")
+	// so internal sub-saga prefixes don't leak into the user view.
+	flag := f.Flag
+	if i := strings.LastIndex(flag, "/"); i >= 0 && i+1 < len(flag) {
+		flag = flag[i+1:]
+	}
+	return titleCaseLabel(strings.ReplaceAll(flag, "-", " "))
+}
+
+// titleCaseLabel capitalises the first letter of each word. Unexported
+// helper for DisplayLabel; duplicated intentionally from the wizard
+// package's titleCase so registry stays dependency-free.
+func titleCaseLabel(s string) string {
+	prev := ' '
+	return strings.Map(func(r rune) rune {
+		if prev == ' ' || prev == '-' {
+			prev = r
+			return unicode.ToUpper(r)
+		}
+		prev = r
+		return r
+	}, s)
 }
 
 // ValidateValue checks the field's built-in kind constraints, then runs the

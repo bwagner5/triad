@@ -89,6 +89,7 @@ type app struct {
 	items         []any
 	cursor        int
 	err           error
+	detailItem    any // enriched item for detail view (fetched via Get)
 
 	// Refresh bookkeeping for the bottom-border counter.
 	lastRefresh time.Time
@@ -113,6 +114,7 @@ type app struct {
 	saga    sagaOverlay
 	confirm confirmOverlay
 	wizard  wizardOverlay
+	review  reviewOverlay
 
 	// sagaProvide is set when a running saga emitted NeedsInput and the
 	// wizard is collecting the missing fields. The next wizardDoneMsg
@@ -306,6 +308,7 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.palette.SetSize(msg.Width, msg.Height)
 		a.saga.SetSize(msg.Width, msg.Height)
 		a.wizard.SetSize(msg.Width, msg.Height)
+		a.review.SetSize(msg.Width, msg.Height)
 	case tea.KeyPressMsg:
 		return a.handleKey(msg)
 	case itemsMsg:
@@ -341,10 +344,21 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dismissSagaMsg:
 		a.saga.Clear()
 		a.sagaCh = nil
+	case detailFetchedMsg:
+		if msg.item != nil && a.mode == modeDetail {
+			a.detailItem = msg.item
+		}
+		return a, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		a.spin, cmd = a.spin.Update(msg)
 		return a, cmd
+	}
+	// Route unhandled messages to review overlay when active.
+	if a.review.Active() {
+		if _, cmd := a.review.Update(msg); cmd != nil {
+			return a, cmd
+		}
 	}
 	// Route unhandled messages to wizard overlay when active (e.g. spinner ticks).
 	if a.wizard.Active() {
@@ -363,7 +377,15 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
-	// Confirm overlay takes priority over everything.
+	// Review overlay (scrollable policy viewer) takes top priority.
+	if a.review.Active() {
+		consumed, cmd := a.review.Update(msg)
+		if consumed {
+			return a, cmd
+		}
+	}
+
+	// Confirm overlay takes priority over everything else.
 	if a.confirm.Active() {
 		return a.handleConfirmKey(key)
 	}
@@ -439,14 +461,13 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
 	trace.Log("tui.wizardDone", "op", msg.op.Name, "hasRun", msg.op.Run != nil, "hasSteps", len(msg.op.Steps) > 0, "hasSagaProvide", a.sagaProvide != nil, "canceled", msg.input == nil)
-	// If a saga is paused waiting for input, route through the confirm
-	// overlay so the user reviews the merged inputs (pre-existing State +
-	// new wizard answers) before the saga resumes. Cancel passes nil to
-	// Provide, which aborts.
+	// If a saga is paused waiting for input, the wizard already showed
+	// the NeedInput.Reason as a preamble and collected the fields.
+	// Provide the merged input directly back to the saga — no separate
+	// confirm overlay needed.
 	if a.sagaProvide != nil {
 		provide := a.sagaProvide
 		preInput := a.sagaPreInput
-		prompt := a.sagaConfirmPrompt
 		a.sagaProvide = nil
 		a.sagaPreInput = nil
 		a.sagaConfirmPrompt = ""
@@ -466,17 +487,13 @@ func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
 		for k, v := range msg.input {
 			merged[k] = v
 		}
-		// Route through confirm. On Yes, startSagaMsg won't fire (we have
-		// no new saga); instead we reuse the confirm overlay with a
-		// synthetic op whose Fields cover the merged keys, and route the
-		// confirm decision back to Provide via a.pendingProvide.
-		a.pendingProvide = provide
-		a.pendingMerged = merged
-		trace.Log("tui.confirm.armed", "fields", len(merged))
-		// Close the wizard so the confirm overlay has the stage.
 		a.wizard.Clear()
-		a.confirm.Show(prompt, nil, sagaNeedConfirmOp(merged), merged)
-		return a, nil
+		a.review.Clear()
+		provideCmd := func() tea.Msg { provide(merged); return nil }
+		if a.sagaCh != nil {
+			return a, tea.Batch(provideCmd, readSagaCmd(a.sagaCh))
+		}
+		return a, provideCmd
 	}
 	// Non-saga cancel: drop on the floor.
 	if msg.input == nil {
@@ -563,13 +580,22 @@ func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
 		trace.Log("tui.saga.needsInput", "step", ev.Step, "fields", len(ev.Needs.Fields))
 		a.sagaProvide = ev.Provide
 		a.sagaPreInput = ev.State
-		a.sagaConfirmPrompt = ev.Needs.Reason
-		if a.sagaConfirmPrompt == "" {
-			a.sagaConfirmPrompt = "Ready to continue?"
-		}
+		a.sagaConfirmPrompt = ""
 		input := registry.Input{}
+
+		// Long reason + single boolean field → use the scrollable
+		// review overlay (viewport + yes/no buttons) so the user
+		// can actually read and scroll the content.
+		if ev.Needs.Reason != "" && len(ev.Needs.Fields) == 1 &&
+			ev.Needs.Fields[0].EffectiveKind() == registry.KindBool {
+			a.review.SetSize(a.width, a.height)
+			a.review.Show(ev.Needs.Reason, ev.Needs.Fields[0],
+				sagaNeedOp(ev.Needs), nil, input)
+			return a, drain()
+		}
+
 		return a, tea.Batch(
-			a.wizard.Show(a.ctx, nil, sagaNeedOp(ev.Needs), ev.Needs.Fields, input),
+			a.wizard.ShowWithPreamble(a.ctx, nil, sagaNeedOp(ev.Needs), ev.Needs.Fields, input, ev.Needs.Reason),
 			drain(),
 		)
 	}
@@ -710,7 +736,7 @@ func (a *app) View() tea.View {
 
 	base := lipgloss.JoinVertical(lipgloss.Left, header, body, bottom)
 
-	overlayActive := a.showHelp || a.showPalette || a.saga.Active() || a.confirm.Active() || a.wizard.Active()
+	overlayActive := a.showHelp || a.showPalette || a.saga.Active() || a.confirm.Active() || a.wizard.Active() || a.review.Active()
 	rootContent := base
 	if overlayActive {
 		rootContent = dimBackground(base)
@@ -732,6 +758,9 @@ func (a *app) View() tea.View {
 	if a.wizard.Active() {
 		// Wizard is full-screen-ish; render it centered and large.
 		overlays = append(overlays, centeredLayer(a.wizard.Box(w, h), w, h, 5))
+	}
+	if a.review.Active() {
+		overlays = append(overlays, centeredLayer(a.review.Box(w, h), w, h, 6))
 	}
 
 	root := lipgloss.NewLayer(rootContent)
@@ -943,7 +972,11 @@ func (a *app) renderList(maxW, maxH int) string {
 		return theme.Err.Render(a.err.Error())
 	}
 	if a.mode == modeDetail && len(a.items) > 0 {
-		return detailFor(a.resource, a.items[a.cursor])
+		item := a.items[a.cursor]
+		if a.detailItem != nil {
+			item = a.detailItem
+		}
+		return detailFor(a.resource, item)
 	}
 	if len(a.items) == 0 && a.initialLoad {
 		return lipgloss.Place(maxW, maxH, lipgloss.Center, lipgloss.Center,
@@ -1085,3 +1118,26 @@ func (a *app) renderBottom(w int) string {
 
 // dismissSagaMsg clears the saga overlay after the auto-dismiss timer fires.
 type dismissSagaMsg struct{}
+
+type detailFetchedMsg struct{ item any }
+
+// fetchDetail kicks off an async Get for the currently selected item
+// so the detail view can show enriched data (statuses, endpoints, etc.).
+func (a *app) fetchDetail() tea.Cmd {
+	if a.resource == nil || a.resource.Store == nil || a.cursor >= len(a.items) {
+		return nil
+	}
+	id := detailID(a.resource, a.items[a.cursor])
+	if id == "" {
+		return nil
+	}
+	store := a.resource.Store
+	ctx := a.ctx
+	return func() tea.Msg {
+		item, err := store.Get(ctx, id)
+		if err != nil {
+			return detailFetchedMsg{item: nil}
+		}
+		return detailFetchedMsg{item: item}
+	}
+}

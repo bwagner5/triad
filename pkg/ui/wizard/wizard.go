@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"unicode"
 
 	"charm.land/bubbles/v2/filepicker"
 	"charm.land/bubbles/v2/spinner"
@@ -66,6 +65,7 @@ type model struct {
 	selIdx            int      // cursor for selection list
 	committed         []string // rendered lines for previously-answered fields
 	committedSections []string // section name for each committed line (parallel)
+	committedIdx      []int    // field index for each committed line (for goBack)
 	termH             int      // terminal height for scroll capping
 
 	err      error
@@ -105,11 +105,28 @@ func (m *model) Init() tea.Cmd {
 
 // startField focuses the input and, if Suggest is set, kicks off a loader.
 func (m *model) startField() tea.Cmd {
-	// Skip fields whose When predicate returns false. Advance until
-	// we find a field to prompt for, or fall off the end.
 	for m.idx < len(m.fields) {
 		f := &m.fields[m.idx]
+		// Skip fields whose When predicate returns false. Also clear
+		// any stale value so it doesn't leak into the saga.
 		if f.When != nil && !f.When(m.in) {
+			delete(m.in, f.Flag)
+			m.idx++
+			continue
+		}
+		// If the field already has a value (from a prior pass before
+		// goBack), auto-recommit it and advance. This preserves
+		// downstream answers the user already gave.
+		if v, ok := m.in[f.Flag]; ok && v != "" {
+			labelText := f.DisplayLabel()
+			displayVal := v
+			if f.Sensitive {
+				displayVal = strings.Repeat("•", len(v))
+			}
+			m.committed = append(m.committed,
+				fmt.Sprintf("%s %s: %s", theme.OKMark, theme.Label.Render(labelText), displayVal))
+			m.committedSections = append(m.committedSections, f.Section)
+			m.committedIdx = append(m.committedIdx, m.idx)
 			m.idx++
 			continue
 		}
@@ -194,11 +211,7 @@ func (m *model) commitAndAdvance(val string) tea.Cmd {
 		return nil
 	}
 	m.in[f.Flag] = val
-	// Use the same title-cased Help text the live label rendered, so
-	// the committed history reads as "Instance Name: ancient-orbit"
-	// instead of exposing internal flag names like "__ni/name".
-	// Sensitive values are masked in the history too.
-	labelText := fieldDisplayLabel(f)
+	labelText := f.DisplayLabel()
 	displayVal := val
 	if f.Sensitive {
 		displayVal = strings.Repeat("•", len(val))
@@ -206,33 +219,41 @@ func (m *model) commitAndAdvance(val string) tea.Cmd {
 	m.committed = append(m.committed,
 		fmt.Sprintf("%s %s: %s", theme.OKMark, theme.Label.Render(labelText), displayVal))
 	m.committedSections = append(m.committedSections, f.Section)
+	// Track which field index produced each committed line so goBack
+	// can find the right field to return to.
+	m.committedIdx = append(m.committedIdx, m.idx)
 	m.idx++
 	return m.startField()
 }
 
-// fieldDisplayLabel returns the user-facing label for f. Preference
-// order: explicit Label > title-cased Help (when it's short and
-// label-shaped) > cleaned-up flag name with any internal prefix
-// stripped. Help is reserved for placeholder/help text and is only
-// used as a label fallback when nothing better is set.
-func fieldDisplayLabel(f *registry.Field) string {
-	if f.Label != "" {
-		return f.Label
+// goBack returns to the previous answered field. Removes committed
+// history from that point onward (startField will re-add still-valid
+// answers automatically) and clears only the target field's value so
+// the user can change it. Downstream answers are preserved unless
+// their When predicate becomes false after the change.
+func (m *model) goBack() tea.Cmd {
+	if len(m.committedIdx) == 0 {
+		return nil // nothing to go back to
 	}
-	// Heuristic: if Help is short (single short phrase), it was
-	// historically used as a label and we keep that behavior. Long
-	// help strings (e.g. a sentence describing the flag's effect)
-	// fall through to the flag-derived label.
-	if f.Help != "" && len(f.Help) <= 40 && !strings.ContainsAny(f.Help, ";.") {
-		return titleCase(f.Help)
+	// Find the field to return to.
+	prevIdx := m.committedIdx[len(m.committedIdx)-1]
+
+	// Truncate committed history to just before that field. Any
+	// entries after it will be re-added by startField if their
+	// values are still in m.in and their When still holds.
+	// Find how many committed entries to keep (all before prevIdx).
+	keepN := len(m.committedIdx) - 1
+	for keepN > 0 && m.committedIdx[keepN-1] >= prevIdx {
+		keepN--
 	}
-	// Strip a leading namespace segment (e.g. "__ni/name" -> "name")
-	// so internal sub-saga prefixes don't leak into the user view.
-	flag := f.Flag
-	if i := strings.LastIndex(flag, "/"); i >= 0 && i+1 < len(flag) {
-		flag = flag[i+1:]
-	}
-	return titleCase(strings.ReplaceAll(flag, "-", " "))
+	m.committed = m.committed[:keepN]
+	m.committedSections = m.committedSections[:keepN]
+	m.committedIdx = m.committedIdx[:keepN]
+
+	// Clear only the target field so it gets re-prompted.
+	delete(m.in, m.fields[prevIdx].Flag)
+	m.idx = prevIdx
+	return m.startField()
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -255,6 +276,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "esc":
 			m.canceled = true
 			return m, tea.Quit
+		case "shift+tab":
+			return m, m.goBack()
 		case "tab":
 			// Tab skips optional fields.
 			if m.curField() != nil && !m.curField().Required {
@@ -412,7 +435,7 @@ func (m *model) View() tea.View {
 	}
 	// Label: use title-cased Help (e.g. "App Name") when available,
 	// falling back to a humanized flag name (strips __ns/ prefixes).
-	labelText := fieldDisplayLabel(f)
+	labelText := f.DisplayLabel()
 	label := theme.Label.Render(labelText)
 	if f.Required {
 		label += theme.Err.Render(" *")
@@ -519,17 +542,4 @@ func (m *model) renderChoices() string {
 	}
 	s += theme.MutedText.Render(hint) + "\n"
 	return s
-}
-
-// titleCase capitalises the first letter of each word.
-func titleCase(s string) string {
-	prev := ' '
-	return strings.Map(func(r rune) rune {
-		if prev == ' ' || prev == '-' {
-			prev = r
-			return unicode.ToUpper(r)
-		}
-		prev = r
-		return r
-	}, s)
 }

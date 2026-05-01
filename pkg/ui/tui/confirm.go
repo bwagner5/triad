@@ -25,7 +25,7 @@ func (c *confirmOverlay) Active() bool { return c.active }
 func (c *confirmOverlay) Show(prompt string, res *registry.Resource, op *registry.Operation, input registry.Input) {
 	c.active = true
 	c.prompt = prompt
-	c.yes = false
+	c.yes = true
 	c.resource = res
 	c.op = op
 	c.input = input
@@ -99,30 +99,42 @@ func (c *confirmOverlay) renderSummary() string {
 	if c.op == nil || len(c.op.Fields) == 0 || len(c.input) == 0 {
 		return ""
 	}
-	// Sort by flag for stable rendering.
-	fields := append([]registry.Field(nil), c.op.Fields...)
-	sort.Slice(fields, func(i, j int) bool { return fields[i].Flag < fields[j].Flag })
+	// Collect visible, non-internal fields with values.
+	var visible []registry.Field
+	for _, f := range c.op.Fields {
+		if f.Wizard != nil && !*f.Wizard {
+			continue // hidden system field
+		}
+		if strings.HasPrefix(f.Flag, "__") {
+			continue // internal namespaced field (already reviewed in wizard)
+		}
+		if _, ok := c.input[f.Flag]; !ok || c.input[f.Flag] == "" {
+			continue
+		}
+		visible = append(visible, f)
+	}
+	if len(visible) == 0 {
+		return ""
+	}
+	sort.Slice(visible, func(i, j int) bool { return visible[i].Flag < visible[j].Flag })
 
 	maxLabel := 0
-	for _, f := range fields {
-		if len(f.Flag) > maxLabel {
-			maxLabel = len(f.Flag)
+	for _, f := range visible {
+		if n := len(f.DisplayLabel()); n > maxLabel {
+			maxLabel = n
 		}
 	}
 
 	var b strings.Builder
 	b.WriteString(theme.Label.Render("Summary"))
 	b.WriteString("\n")
-	for _, f := range fields {
-		v, ok := c.input[f.Flag]
-		if !ok || v == "" {
-			continue
-		}
+	for _, f := range visible {
+		v := c.input[f.Flag]
 		if f.Sensitive {
 			v = strings.Repeat("•", len(v))
 		}
 		fmt.Fprintf(&b, "  %s  %s\n",
-			theme.MutedText.Render(fmt.Sprintf("%-*s", maxLabel, f.Flag)),
+			theme.MutedText.Render(fmt.Sprintf("%-*s", maxLabel, f.DisplayLabel())),
 			theme.Value.Render(v),
 		)
 	}

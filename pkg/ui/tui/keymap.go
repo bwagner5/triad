@@ -62,11 +62,14 @@ func (a *app) keyMap() []binding {
 		binding{Key: "enter", Label: "detail", Cat: "Navigation", Run: func(a *app) (tea.Model, tea.Cmd) {
 			if a.mode == modeList && len(a.items) > 0 {
 				a.mode = modeDetail
+				a.detailItem = nil // show list item immediately, enrich async
+				return a, a.fetchDetail()
 			}
 			return a, nil
 		}},
 		binding{Key: "esc", Label: "back", Cat: "Navigation", Run: func(a *app) (tea.Model, tea.Cmd) {
 			a.mode = modeList
+			a.detailItem = nil
 			return a, nil
 		}},
 		binding{Key: "backspace", Label: "back", Cat: "Navigation", Run: func(a *app) (tea.Model, tea.Cmd) {
