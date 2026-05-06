@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -49,11 +50,11 @@ type Globals struct {
 	Output         string // short | wide | yaml | json
 	NonInteractive bool   // true: never prompt, append-only log; false (default): prompt + live view
 	Verbose        bool
-	// Debug enables trace logging. DebugFile overrides the default log
-	// path (<cliName>-trace.log in cwd). Triad components call
-	// trace.Log(...) which is a no-op when disabled.
-	Debug     bool
-	DebugFile string
+	// Debug flips the process-global trace.LevelVar from INFO to
+	// LevelTrace. File paths, sinks, and the handler chain are owned
+	// by the embedder (lightsailctl's internal/logging) — this package
+	// only has authority over the level threshold.
+	Debug bool
 	// Prompter overrides the interactive input collector. Nil means use the
 	// default wizard-based prompter. Set in tests to a stub.
 	Prompter Prompter
@@ -102,16 +103,16 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 	noIntDefault := envBool(ge, rootUse, "no-interactive", false)
 	verboseDefault := envBool(ge, rootUse, "verbose", false)
 	debugDefault := envBool(ge, rootUse, "debug", false)
-	debugFileDefault := envOr(ge, rootUse, "debug-file", rootUse+"-trace.log")
 	root.PersistentFlags().StringVarP(&g.Output, "output", "o", outDefault, envHelp(rootUse, "output", "output: short|wide|yaml|json"))
 	root.PersistentFlags().BoolVarP(&g.NonInteractive, "no-interactive", "y", noIntDefault, envHelp(rootUse, "no-interactive", "disable interactive prompts and live progress (for CI / scripts)"))
 	root.PersistentFlags().BoolVar(&g.Verbose, "verbose", verboseDefault, envHelp(rootUse, "verbose", "verbose output"))
-	root.PersistentFlags().BoolVar(&g.Debug, "debug", debugDefault, envHelp(rootUse, "debug", "enable trace logging"))
-	root.PersistentFlags().StringVar(&g.DebugFile, "debug-file", debugFileDefault, envHelp(rootUse, "debug-file", "trace log path (when --debug is set)"))
+	root.PersistentFlags().BoolVar(&g.Debug, "debug", debugDefault, envHelp(rootUse, "debug", "enable trace logging (flips the global level threshold to TRACE)"))
 
-	// Enable trace logging as soon as flags are parsed, so every subcommand
-	// Run sees an active trace writer. PersistentPreRunE wraps any existing
-	// one on root so we don't stomp callers that registered their own.
+	// Triad is a library: path resolution, sink selection, and handler
+	// chain live in the embedder. Here we only flip the shared
+	// LevelVar and stamp ui/cmd attrs on the logger the embedder
+	// attached to ctx. PersistentPreRunE wraps any existing one so we
+	// don't stomp callers that registered their own.
 	prevPreRun := root.PersistentPreRunE
 	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
 		if prevPreRun != nil {
@@ -120,15 +121,16 @@ func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Com
 			}
 		}
 		if g.Debug {
-			path := g.DebugFile
-			if path == "" {
-				path = rootUse + "-trace.log"
-			}
-			if _, err := trace.Enable(path); err != nil {
-				return fmt.Errorf("--debug: %w", err)
-			}
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "trace log: %s\n", path)
+			trace.SetLevel(trace.LevelTrace)
 		}
+		ui := "interactive"
+		if g.NonInteractive {
+			ui = "cli"
+		}
+		ctx := trace.WithAttrs(cmd.Context(),
+			slog.String("ui", ui),
+			slog.String("cmd", cmd.CommandPath()))
+		cmd.SetContext(ctx)
 		return nil
 	}
 

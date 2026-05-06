@@ -154,11 +154,11 @@ func (a *app) keyMap() []binding {
 func (a *app) dispatch(key string) (tea.Model, tea.Cmd, bool) {
 	for _, b := range a.keyMap() {
 		if b.Key == key {
-			trace.Log("tui.dispatch", "key", key, "label", b.Label, "cat", b.Cat)
+			trace.Trace(a.ctx, "tui dispatch", "key", key, "label", b.Label, "cat", b.Cat)
 			m, cmd := b.Run(a)
 			return m, cmd, true
 		}
 	}
-	trace.Log("tui.dispatch.miss", "key", key)
+	trace.Trace(a.ctx, "tui dispatch miss", "key", key)
 	return a, nil, false
 }

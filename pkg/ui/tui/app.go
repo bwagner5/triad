@@ -57,13 +57,15 @@ type Options struct {
 
 // Run starts the full-screen TUI against the given registry.
 func Run(ctx context.Context, reg *registry.Registry, opts Options) error {
-	trace.Log("tui.Run",
+	ctx = trace.WithUI(ctx, "tui")
+	log := trace.FromContext(ctx)
+	log.InfoContext(ctx, "tui start",
 		"name", opts.Name, "resources", len(reg.All()),
 		"globalOps", len(opts.GlobalOps), "hasContext", opts.Context != nil,
 	)
 	m := newApp(ctx, reg, opts)
 	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
-	trace.Log("tui.Run.exit", "err", err)
+	log.InfoContext(ctx, "tui exit", "err", err)
 	return err
 }
 
@@ -206,11 +208,11 @@ func (a *app) refresh() tea.Cmd {
 	// first batch of the new stream arrives, then replace. handleItems
 	// tracks which gens it has seen a first batch for.
 	if ss, ok := res.Store.(registry.StreamStore); ok {
-		trace.Log("tui.refresh.stream", "resource", res.Name, "gen", gen)
+		trace.Trace(a.ctx, "tui refresh stream", "resource", res.Name, "gen", gen)
 		ch := ss.StreamList(a.ctx, registry.Filter{})
 		return a.readStream(res.Name, ch, gen)
 	}
-	trace.Log("tui.refresh.list", "resource", res.Name, "gen", gen)
+	trace.Trace(a.ctx, "tui refresh list", "resource", res.Name, "gen", gen)
 	return func() tea.Msg {
 		items, err := res.Store.List(a.ctx, registry.Filter{})
 		return itemsMsg{resource: res.Name, items: items, err: err, final: true, gen: gen}
@@ -222,10 +224,10 @@ func (a *app) readStream(name string, ch <-chan registry.Batch, gen int) tea.Cmd
 	return func() tea.Msg {
 		b, ok := <-ch
 		if !ok {
-			trace.Log("tui.stream.final", "resource", name, "gen", gen)
+			trace.Trace(a.ctx, "tui stream final", "resource", name, "gen", gen)
 			return itemsMsg{resource: name, streamed: true, final: true, gen: gen}
 		}
-		trace.Log("tui.stream.batch", "resource", name, "items", len(b.Items), "err", b.Err, "gen", gen)
+		trace.Trace(a.ctx, "tui stream batch", "resource", name, "items", len(b.Items), "err", b.Err, "gen", gen)
 		return itemsMsg{resource: name, items: b.Items, err: b.Err, streamed: true, next: ch, gen: gen}
 	}
 }
@@ -240,7 +242,7 @@ func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 	// in flight when refresh() is called again would append to the fresh
 	// list and produce duplicates.
 	if msg.gen != a.streamGen {
-		trace.Log("tui.items.stale", "gen", msg.gen, "current", a.streamGen)
+		trace.Trace(a.ctx, "tui items stale", "gen", msg.gen, "current", a.streamGen)
 		return a, nil
 	}
 	if !msg.streamed {
@@ -314,7 +316,17 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case itemsMsg:
 		return a.handleItems(msg)
 	case tickMsg:
-		return a, tea.Batch(a.refresh())
+		cmds := []tea.Cmd{a.refresh()}
+		// Keep the detail pane in sync with the periodic list
+		// refresh. Without this, a user parked on a detail view sees
+		// frozen deploy/container state even though the list under
+		// it is being refreshed every interval.
+		if a.mode == modeDetail {
+			if cmd := a.fetchDetail(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return a, tea.Batch(cmds...)
 	case repaintMsg:
 		return a, a.repaintTick()
 	case toastExpireMsg:
@@ -339,6 +351,14 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionDoneMsg:
 		if msg.err != nil {
 			return a, a.showToast(toastErr, msg.err.Error())
+		}
+		// Same rationale as the saga-done path: refresh repopulates
+		// the table, but the detail pane's a.detailItem has to be
+		// re-fetched separately.
+		if a.mode == modeDetail {
+			if cmd := a.fetchDetail(); cmd != nil {
+				return a, tea.Batch(a.refresh(), cmd)
+			}
 		}
 		return a, a.refresh()
 	case dismissSagaMsg:
@@ -460,7 +480,7 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
-	trace.Log("tui.wizardDone", "op", msg.op.Name, "hasRun", msg.op.Run != nil, "hasSteps", len(msg.op.Steps) > 0, "hasSagaProvide", a.sagaProvide != nil, "canceled", msg.input == nil)
+	trace.Trace(a.ctx, "tui wizard done", "op", msg.op.Name, "hasRun", msg.op.Run != nil, "hasSteps", len(msg.op.Steps) > 0, "hasSagaProvide", a.sagaProvide != nil, "canceled", msg.input == nil)
 	// If a saga is paused waiting for input, the wizard already showed
 	// the NeedInput.Reason as a preamble and collected the fields.
 	// Provide the merged input directly back to the saga — no separate
@@ -515,7 +535,7 @@ func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
 		a.wizard.Clear()
 		return a, func() tea.Msg {
 			err := op.Run(a.ctx, input)
-			trace.Log("tui.wizardDone.run", "op", op.Name, "err", err)
+			trace.Trace(a.ctx, "tui wizard done run", "op", op.Name, "err", err)
 			return actionDoneMsg{err: err}
 		}
 	}
@@ -577,7 +597,7 @@ func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
 	}
 
 	if ev.Status == runtime.NeedsInput && ev.Needs != nil && ev.Provide != nil {
-		trace.Log("tui.saga.needsInput", "step", ev.Step, "fields", len(ev.Needs.Fields))
+		trace.Trace(a.ctx, "tui saga needs input", "step", ev.Step, "fields", len(ev.Needs.Fields))
 		a.sagaProvide = ev.Provide
 		a.sagaPreInput = ev.State
 		a.sagaConfirmPrompt = ""
@@ -609,7 +629,18 @@ func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
 		} else {
 			toastCmd = a.showToast(toastOK, fmt.Sprintf("%s succeeded", ev.Saga))
 		}
-		return a, tea.Batch(a.saga.DismissAfter(), a.refresh(), a.subscribeBus(), toastCmd)
+		cmds := []tea.Cmd{a.saga.DismissAfter(), a.refresh(), a.subscribeBus(), toastCmd}
+		// When the saga ran from the detail view, re-fetch the
+		// currently-selected item so the pane reflects any state it
+		// just mutated (e.g. deploy updates last-deploy + container
+		// status). The list refresh() above only repopulates the
+		// table; a.detailItem is populated via a separate Get.
+		if a.mode == modeDetail {
+			if cmd := a.fetchDetail(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
+		return a, tea.Batch(cmds...)
 	}
 	return a, drain()
 }
@@ -626,7 +657,7 @@ func (a *app) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 	// still false because the cursor was flipped but Enter not pressed).
 	// confirm.active goes false only on a terminal key (y/n/esc/enter).
 	decided := accepted && !a.confirm.Active()
-	trace.Log("tui.confirm.key", "key", key, "accepted", accepted, "confirmed", confirmed, "decided", decided, "pendingProvide", a.pendingProvide != nil)
+	trace.Trace(a.ctx, "tui confirm key", "key", key, "accepted", accepted, "confirmed", confirmed, "decided", decided, "pendingProvide", a.pendingProvide != nil)
 	if !decided {
 		return a, nil
 	}
@@ -636,7 +667,7 @@ func (a *app) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 		merged := a.pendingMerged
 		a.pendingProvide = nil
 		a.pendingMerged = nil
-		trace.Log("tui.confirm.routed", "path", "saga-resume", "confirmed", confirmed)
+		trace.Trace(a.ctx, "tui confirm routed", "path", "saga-resume", "confirmed", confirmed)
 		if confirmed {
 			provideCmd := func() tea.Msg { provide(merged); return nil }
 			if a.sagaCh != nil {
@@ -654,7 +685,7 @@ func (a *app) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 	// startSaga if the op actually has Steps or Run — protects against
 	// a stray synthetic op slipping through.
 	if confirmed && a.confirm.op != nil && (len(a.confirm.op.Steps) > 0 || a.confirm.op.Run != nil) {
-		trace.Log("tui.confirm.routed", "path", "fresh-saga", "op", a.confirm.op.Name)
+		trace.Trace(a.ctx, "tui confirm routed", "path", "fresh-saga", "op", a.confirm.op.Name)
 		return a, func() tea.Msg {
 			return startSagaMsg{
 				resource: a.confirm.resource,
@@ -663,7 +694,7 @@ func (a *app) handleConfirmKey(key string) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	trace.Log("tui.confirm.routed", "path", "dismiss", "confirmed", confirmed)
+	trace.Trace(a.ctx, "tui confirm routed", "path", "dismiss", "confirmed", confirmed)
 	return a, nil
 }
 

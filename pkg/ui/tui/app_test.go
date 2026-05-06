@@ -4,9 +4,11 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/runtime"
 )
 
 // TestTabsOnLastRow asserts the k9s-style breadcrumb pills live on the bottom row.
@@ -218,5 +220,173 @@ func TestContextDisplayedInFooter(t *testing.T) {
 	plain := stripANSI(m.(*app).View().Content)
 	if !strings.Contains(plain, "us-east-2") {
 		t.Errorf("context label not in view:\n%s", plain)
+	}
+}
+
+
+// getCountingStore records how many times Get has been called so tests
+// can assert that detail refetches are actually issued.
+type getCountingStore struct {
+	gets int
+	item any
+}
+
+func (s *getCountingStore) Get(_ context.Context, _ string) (any, error) {
+	s.gets++
+	return s.item, nil
+}
+
+func (s *getCountingStore) List(_ context.Context, _ registry.Filter) ([]any, error) {
+	if s.item != nil {
+		return []any{s.item}, nil
+	}
+	return nil, nil
+}
+
+// drainCmd runs cmd (and any follow-on cmds it returns) synchronously
+// and threads the resulting msgs through m.Update until the tree is
+// drained. Blocking commands (e.g. subscribeBus waiting on a channel)
+// are bounded by a short per-command timeout so they don't hang the
+// test. depth caps the recursion to prevent runaway pumps.
+func drainCmd(t *testing.T, m tea.Model, cmd tea.Cmd, depth int) tea.Model {
+	t.Helper()
+	if cmd == nil || depth <= 0 {
+		return m
+	}
+	msg := runCmdWithTimeout(cmd)
+	if msg == nil {
+		return m
+	}
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range batch {
+			m = drainCmd(t, m, c, depth-1)
+		}
+		return m
+	}
+	var next tea.Cmd
+	m, next = m.Update(msg)
+	return drainCmd(t, m, next, depth-1)
+}
+
+// runCmdWithTimeout executes cmd in a goroutine, returning its msg or
+// nil if it doesn't complete within 50ms. This is how we skip
+// subscribeBus (which blocks on a <-chan Event that never fires in
+// tests) without rewriting the production code to accept a mock bus.
+func runCmdWithTimeout(cmd tea.Cmd) tea.Msg {
+	if cmd == nil {
+		return nil
+	}
+	done := make(chan tea.Msg, 1)
+	go func() {
+		defer func() { _ = recover() }() // tea.Tick under test can panic; ignore
+		done <- cmd()
+	}()
+	select {
+	case msg := <-done:
+		return msg
+	case <-time.After(50 * time.Millisecond):
+		return nil
+	}
+}
+
+func TestSagaDoneInDetailModeRefetchesDetail(t *testing.T) {
+	// Regression: after a deploy (or any saga) completes while the
+	// detail view is up, the detail pane must refetch so fields the
+	// saga mutated (last-deploy, container status) reflect reality.
+	store := &getCountingStore{item: detailWidget{Name: "hello"}}
+	reg := registry.New()
+	reg.Register(registry.Resource{
+		Name:   "thing",
+		Plural: "things",
+		Store:  store,
+		Fields: []registry.Field{{Name: "Name", Flag: "name", Table: registry.TableHint{Header: "NAME"}}},
+	})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	a.items = []any{detailWidget{Name: "hello"}}
+	a.mode = modeDetail
+	a.cursor = 0
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	before := store.gets
+
+	// Simulate a saga-done event from the runtime bus.
+	doneEv := sagaEventMsg(runtime.Event{
+		Saga:     "deploy",
+		Resource: "thing",
+		Done:     true,
+		Status:   runtime.OK,
+	})
+	_, cmd := m.Update(doneEv)
+	_ = drainCmd(t, m, cmd, 16)
+
+	if got := store.gets - before; got < 1 {
+		t.Errorf("expected at least one Get after saga done in detail mode; got %d", got)
+	}
+}
+
+func TestSagaDoneInListModeSkipsDetailRefetch(t *testing.T) {
+	// Symmetry guard: when the saga fires while the user is on the
+	// LIST view, we should NOT issue a Get — Get is only for the
+	// currently-rendered detail pane.
+	store := &getCountingStore{item: detailWidget{Name: "hello"}}
+	reg := registry.New()
+	reg.Register(registry.Resource{
+		Name:   "thing",
+		Plural: "things",
+		Store:  store,
+		Fields: []registry.Field{{Name: "Name", Flag: "name", Table: registry.TableHint{Header: "NAME"}}},
+	})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	a.items = []any{detailWidget{Name: "hello"}}
+	a.mode = modeList
+	a.cursor = 0
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	before := store.gets
+
+	doneEv := sagaEventMsg(runtime.Event{
+		Saga:     "deploy",
+		Resource: "thing",
+		Done:     true,
+		Status:   runtime.OK,
+	})
+	_, cmd := m.Update(doneEv)
+	_ = drainCmd(t, m, cmd, 16)
+
+	if got := store.gets - before; got != 0 {
+		t.Errorf("list mode must not issue Get after saga done; got %d extra Gets", got)
+	}
+}
+
+func TestTickInDetailModeRefetchesDetail(t *testing.T) {
+	// The periodic refresh tick should keep the detail pane warm too,
+	// not just the list. Otherwise a user parked on a detail view
+	// would see frozen state until they navigate away and back.
+	store := &getCountingStore{item: detailWidget{Name: "hello"}}
+	reg := registry.New()
+	reg.Register(registry.Resource{
+		Name:   "thing",
+		Plural: "things",
+		Store:  store,
+		Fields: []registry.Field{{Name: "Name", Flag: "name", Table: registry.TableHint{Header: "NAME"}}},
+	})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	a.items = []any{detailWidget{Name: "hello"}}
+	a.mode = modeDetail
+	a.cursor = 0
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+
+	before := store.gets
+	_, cmd := m.Update(tickMsg{})
+	_ = drainCmd(t, m, cmd, 16)
+
+	if got := store.gets - before; got < 1 {
+		t.Errorf("expected at least one Get after tick in detail mode; got %d", got)
 	}
 }

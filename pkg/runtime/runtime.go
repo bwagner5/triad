@@ -4,10 +4,12 @@ package runtime
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/bwagner5/triad/pkg/registry"
+	"github.com/bwagner5/triad/pkg/trace"
 )
 
 // Status of a single saga step.
@@ -83,8 +85,22 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 		defer close(ch)
 		st := &registry.State{Input: in, Data: map[string]any{}}
 		total := len(op.Steps)
+
+		// Stamp saga-wide attrs on the logger attached to ctx. Every
+		// downstream step Do function and any log emitted within it
+		// inherits resource/saga/op without repeating them per call.
+		sagaCtx := trace.WithAttrs(ctx,
+			slog.String("resource", res.Name),
+			slog.String("saga", op.Name),
+			slog.String("op", op.Name),
+		)
+		sagaLog := trace.FromContext(sagaCtx)
+		sagaStart := time.Now()
+		sagaLog.InfoContext(sagaCtx, "saga start", slog.Int("total_steps", total))
+
 		var runErr error
 		var lastIdx int
+		var okCount, failedCount, skippedCount int
 		// Track the final aggregate Output separately from per-step
 		// Output. Each step may set st.Output to describe its own
 		// result (e.g. "Role ARN: …"); we copy that into the OK
@@ -96,23 +112,36 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 		var finalOutput string
 		for i, step := range op.Steps {
 			lastIdx = i
+
+			// Per-step attrs on top of saga-wide attrs.
+			stepCtx := trace.WithAttrs(sagaCtx,
+				slog.String("step", step.Label),
+				slog.Int("step_index", i),
+				slog.Int("total_steps", total),
+			)
+			stepLog := trace.FromContext(stepCtx)
+
 			if step.Skip != nil && step.Skip(st) {
+				stepLog.InfoContext(stepCtx, "step skipped")
+				skippedCount++
 				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Skipped, At: time.Now()}
 				continue
 			}
 			st.Output = ""
+			stepStart := time.Now()
+			stepLog.InfoContext(stepCtx, "step start")
 			// A step may return registry.NeedInput; the runtime pauses,
 			// asks the consumer for the listed fields, and retries the
 			// same step. Runs at most 8 times per step to prevent loops.
 			var stepErr error
 			for attempt := 0; attempt < 8; attempt++ {
 				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Running, At: time.Now()}
-				stepErr = step.Do(ctx, st)
+				stepErr = step.Do(stepCtx, st)
 				var need *registry.NeedInput
 				if !errors.As(stepErr, &need) {
 					break
 				}
-				if !solicitInput(ctx, ch, op, res, step, i, total, st, need) {
+				if !solicitInput(stepCtx, ch, op, res, step, i, total, st, need) {
 					// consumer declined; treat as step failure
 					stepErr = errors.New("input required but not provided")
 					break
@@ -120,11 +149,15 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 				// retry with merged input
 			}
 			if stepErr != nil {
+				stepLog.ErrorContext(stepCtx, "step failed",
+					slog.Any("err", stepErr),
+					slog.Duration("elapsed", time.Since(stepStart)))
+				failedCount++
 				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Failed, Err: stepErr, At: time.Now()}
 				runErr = stepErr
 				for j := i - 1; j >= 0; j-- {
 					if op.Steps[j].Undo != nil {
-						_ = op.Steps[j].Undo(ctx, st)
+						_ = op.Steps[j].Undo(stepCtx, st)
 					}
 				}
 				break
@@ -133,6 +166,9 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 			if stepOutput != "" {
 				finalOutput = stepOutput
 			}
+			stepLog.InfoContext(stepCtx, "step ok",
+				slog.Duration("elapsed", time.Since(stepStart)))
+			okCount++
 			ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: OK, Output: stepOutput, At: time.Now()}
 		}
 		final := Event{Saga: op.Name, Resource: res.Name, Index: -1, Total: total, Status: OK, At: time.Now(), Done: true, Output: finalOutput}
@@ -140,6 +176,17 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 			final.Status = Failed
 			final.Err = runErr
 			final.Index = lastIdx
+			sagaLog.ErrorContext(sagaCtx, "saga failed",
+				slog.Any("err", runErr),
+				slog.Duration("elapsed", time.Since(sagaStart)),
+				slog.Int("ok_count", okCount),
+				slog.Int("failed_count", failedCount),
+				slog.Int("skipped_count", skippedCount))
+		} else {
+			sagaLog.InfoContext(sagaCtx, "saga ok",
+				slog.Duration("elapsed", time.Since(sagaStart)),
+				slog.Int("ok_count", okCount),
+				slog.Int("skipped_count", skippedCount))
 		}
 		if bus != nil {
 			bus.Publish(final)

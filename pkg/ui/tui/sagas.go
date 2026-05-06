@@ -46,7 +46,7 @@ func (a *app) launchOp(res *registry.Resource, op *registry.Operation, input reg
 	// user sees what went wrong.
 	if op.Pre != nil {
 		if err := op.Pre(a.ctx, input); err != nil {
-			trace.Log("tui.launchOp.preErr", "op", op.Name, "err", err)
+			trace.Trace(a.ctx, "tui launch op pre err", "op", op.Name, "err", err)
 			return a.showToast(toastErr, err.Error())
 		}
 	}
@@ -55,7 +55,7 @@ func (a *app) launchOp(res *registry.Resource, op *registry.Operation, input reg
 	if res != nil {
 		resName = res.Name
 	}
-	trace.Log("tui.launchOp",
+	trace.Trace(a.ctx, "tui launch op",
 		"resource", resName, "op", op.Name,
 		"hasSteps", len(op.Steps) > 0, "hasRun", op.Run != nil,
 		"fields", len(op.Fields), "missing", len(missing),
@@ -64,31 +64,31 @@ func (a *app) launchOp(res *registry.Resource, op *registry.Operation, input reg
 
 	// Run op with missing inputs → wizard overlay, then run in-process.
 	if op.Run != nil && len(op.Steps) == 0 && len(missing) > 0 {
-		trace.Log("tui.launchOp.route", "kind", "wizard-then-run")
+		trace.Trace(a.ctx, "tui launch op route", "kind", "wizard-then-run")
 		return a.wizard.Show(a.ctx, res, op, missing, input)
 	}
 
 	// Run op with nothing to prompt for → full tty via tea.Exec.
 	if op.Run != nil && len(op.Steps) == 0 {
-		trace.Log("tui.launchOp.route", "kind", "tea.Exec")
+		trace.Trace(a.ctx, "tui launch op route", "kind", "tea.Exec")
 		cmd := &actionExec{ctx: a.ctx, missing: nil, input: input, op: op}
 		return tea.Exec(cmd, func(err error) tea.Msg {
-			trace.Log("tui.launchOp.actionDone", "op", op.Name, "err", err)
+			trace.Trace(a.ctx, "tui launch op action done", "op", op.Name, "err", err)
 			return actionDoneMsg{err: err}
 		})
 	}
 
 	// Saga path: wizard overlay (if needed) → confirm (if set) → saga.
 	if len(missing) > 0 {
-		trace.Log("tui.launchOp.route", "kind", "wizard-overlay")
+		trace.Trace(a.ctx, "tui launch op route", "kind", "wizard-overlay")
 		return a.wizard.Show(a.ctx, res, op, missing, input)
 	}
 	if op.Confirm != "" {
-		trace.Log("tui.launchOp.route", "kind", "confirm-overlay")
+		trace.Trace(a.ctx, "tui launch op route", "kind", "confirm-overlay")
 		a.confirm.Show(op.Confirm, res, op, input)
 		return nil
 	}
-	trace.Log("tui.launchOp.route", "kind", "saga")
+	trace.Trace(a.ctx, "tui launch op route", "kind", "saga")
 	return func() tea.Msg {
 		return startSagaMsg{resource: res, op: op, input: input}
 	}
@@ -99,14 +99,14 @@ func (a *app) launchOp(res *registry.Resource, op *registry.Operation, input reg
 // events just carry an empty resource name.
 func (a *app) startSaga(msg startSagaMsg) tea.Cmd {
 	if msg.err != nil || msg.op == nil {
-		trace.Log("tui.startSaga.abort", "err", msg.err, "opNil", msg.op == nil)
+		trace.Trace(a.ctx, "tui start saga abort", "err", msg.err, "opNil", msg.op == nil)
 		return nil
 	}
 	var res registry.Resource
 	if msg.resource != nil {
 		res = *msg.resource
 	}
-	trace.Log("tui.startSaga", "op", msg.op.Name, "resource", res.Name, "steps", len(msg.op.Steps))
+	trace.Trace(a.ctx, "tui start saga", "op", msg.op.Name, "resource", res.Name, "steps", len(msg.op.Steps))
 	ch := runtime.Run(a.ctx, a.bus, res, *msg.op, msg.input)
 	a.sagaCh = ch
 	a.saga.Start(msg.op.Name)
@@ -168,15 +168,15 @@ type actionExec struct {
 }
 
 func (e *actionExec) Run() error {
-	trace.Log("tui.actionExec.Run", "op", e.op.Name, "missing", len(e.missing))
+	trace.Trace(e.ctx, "tui action exec run", "op", e.op.Name, "missing", len(e.missing))
 	if len(e.missing) > 0 {
 		if err := wizard.Collect(e.ctx, e.missing, e.input); err != nil {
-			trace.Log("tui.actionExec.wizardErr", "err", err)
+			trace.Trace(e.ctx, "tui action exec wizard err", "err", err)
 			return err
 		}
 	}
 	err := e.op.Run(e.ctx, e.input)
-	trace.Log("tui.actionExec.done", "op", e.op.Name, "err", err)
+	trace.Trace(e.ctx, "tui action exec done", "op", e.op.Name, "err", err)
 	return err
 }
 func (e *actionExec) SetStdin(r io.Reader)  { e.stdin = r }

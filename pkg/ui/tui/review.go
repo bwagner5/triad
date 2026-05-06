@@ -2,16 +2,19 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/ui/theme"
 )
 
-// reviewOverlay is a scrollable full-screen overlay for reviewing long
-// content (e.g. IAM policies) with a yes/no confirmation at the bottom.
-// It wraps the bubbles viewport for native pgup/pgdown/arrow scrolling.
+// reviewOverlay is a scrollable overlay for reviewing content (e.g. IAM
+// policies) with a yes/no confirmation at the bottom. It wraps the
+// bubbles viewport for native pgup/pgdown/arrow scrolling. Width adapts
+// to content: short prompts get a compact box, long content expands.
 type reviewOverlay struct {
 	active   bool
 	vp       viewport.Model
@@ -21,6 +24,7 @@ type reviewOverlay struct {
 	resource *registry.Resource
 	input    registry.Input
 	w, h     int
+	contentW int // widest content line (drives dynamic box width)
 }
 
 func (r *reviewOverlay) Active() bool     { return r.active }
@@ -34,21 +38,48 @@ func (r *reviewOverlay) Show(content string, field registry.Field, op *registry.
 	r.op = op
 	r.resource = res
 	r.input = input
-	// Default to Yes (the user already opted in at the prior prompt).
 	r.yes = true
 
-	vpW := r.w - 4
-	if vpW < 40 {
-		vpW = 40
+	// Measure widest line to drive dynamic box width.
+	maxLine := 0
+	for _, line := range strings.Split(content, "\n") {
+		if n := len(line); n > maxLine {
+			maxLine = n
+		}
 	}
-	// Reserve: border(2) + heading(2) + buttons(3) + hint(2) + scroll%(1)
+	r.contentW = maxLine
+
+	boxW := r.boxWidth(r.w)
+	vpW := boxW - 2
+
 	vpH := r.h - 10
 	if vpH < 5 {
 		vpH = 5
 	}
+	contentLines := strings.Count(content, "\n") + 1
+	if contentLines < vpH {
+		vpH = contentLines
+	}
 	r.vp = viewport.New(viewport.WithWidth(vpW), viewport.WithHeight(vpH))
 	r.vp.SoftWrap = true
 	r.vp.SetContent(content)
+}
+
+// boxWidth computes the overlay width: max(60, content needs + padding)
+// capped at terminal width - 4.
+func (r *reviewOverlay) boxWidth(termW int) int {
+	// content + border padding (4 chars for border + inner margin)
+	w := r.contentW + 4
+	if w < 60 {
+		w = 60
+	}
+	if w > termW-4 {
+		w = termW - 4
+	}
+	if w < 40 {
+		w = 40
+	}
+	return w
 }
 
 func (r *reviewOverlay) Clear() {
@@ -72,7 +103,6 @@ func (r *reviewOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 		case "enter":
 			return true, r.finish(r.yes)
 		default:
-			// Forward to viewport for scroll handling.
 			var cmd tea.Cmd
 			r.vp, cmd = r.vp.Update(msg)
 			return true, cmd
@@ -97,36 +127,39 @@ func (r *reviewOverlay) finish(confirmed bool) tea.Cmd {
 }
 
 func (r *reviewOverlay) Box(w, h int) string {
-	boxW := w - 4
-	if boxW < 40 {
-		boxW = 40
-	}
+	boxW := r.boxWidth(w)
 
-	// Resize viewport if terminal changed.
 	vpH := h - 10
 	if vpH < 5 {
 		vpH = 5
+	}
+	totalLines := r.vp.TotalLineCount()
+	if totalLines > 0 && totalLines < vpH {
+		vpH = totalLines
 	}
 	r.vp.SetWidth(boxW - 2)
 	r.vp.SetHeight(vpH)
 
 	header := theme.Heading.Render("Review") + "\n\n"
 
-	scrollPct := fmt.Sprintf(" %d%% ", int(r.vp.ScrollPercent()*100))
-	scrollInfo := theme.MutedText.Render(scrollPct)
+	// Only show scroll percentage when content overflows the viewport.
+	scrollInfo := ""
+	if totalLines > vpH {
+		scrollInfo = theme.MutedText.Render(fmt.Sprintf(" %d%% ", int(r.vp.ScrollPercent()*100)))
+	}
 
 	yesStyle := theme.MutedText
 	noStyle := theme.MutedText
 	if r.yes {
-		yesStyle = theme.Value
+		yesStyle = lipgloss.NewStyle().Background(theme.Success).Foreground(lipgloss.Color("#0b0f14")).Bold(true).Padding(0, 2)
 	} else {
-		noStyle = theme.Value
+		noStyle = lipgloss.NewStyle().Background(theme.Danger).Foreground(lipgloss.Color("#0b0f14")).Bold(true).Padding(0, 2)
 	}
 	buttons := fmt.Sprintf("\n  %s   %s\n",
-		noStyle.Render("[ No ]"),
-		yesStyle.Render("[ Yes ]"),
+		noStyle.Render(" No "),
+		yesStyle.Render(" Yes "),
 	)
-	hint := theme.MutedText.Render("  ↑/↓/pgup/pgdown scroll · y/n · enter confirm · esc cancel")
+	hint := theme.MutedText.Render("  ↑/↓ scroll · y/n · enter confirm · esc cancel")
 
 	body := header + r.vp.View() + "\n" + scrollInfo + buttons + "\n" + hint
 	return theme.Border.Width(boxW).MaxWidth(boxW + 2).Render(body)

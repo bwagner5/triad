@@ -54,9 +54,10 @@ func (s *sagaOverlay) Push(e runtime.Event) {
 	s.events[e.Index] = e
 }
 
-// DismissAfter returns a command that sends dismissSagaMsg after a few seconds.
+// DismissAfter returns a command that sends dismissSagaMsg after a delay,
+// giving the user time to read the completed workflow steps.
 func (s *sagaOverlay) DismissAfter() tea.Cmd {
-	d := 3 * time.Second
+	d := 4 * time.Second
 	if s.err != nil {
 		d = 6 * time.Second
 	}

@@ -553,7 +553,7 @@ func (wo *wizardOverlay) fileKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 
 func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
-	trace.Log("tui.wizard.key",
+	trace.Trace(wo.ctx, "tui wizard key",
 		"key", key, "idx", wo.idx, "isSelect", wo.isSelect(wo.idx),
 		"loading", wo.idx < len(wo.loading) && wo.loading[wo.idx],
 		"choices", len(wo.choices[wo.idx]), "selIdx", wo.selIdx[wo.idx],
