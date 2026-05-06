@@ -422,6 +422,9 @@ type Resource struct {
 	// and TUI. Operations with Steps render as multi-step workflows;
 	// operations with only Run render as simple actions.
 	Operations map[string]Operation
+	// Shutdown is called when the process exits to release resources held
+	// by this resource's store (e.g., cached access keys). Optional.
+	Shutdown func()
 }
 
 // Registry is a concurrent-safe collection of Resources.
