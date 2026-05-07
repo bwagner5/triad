@@ -119,3 +119,32 @@ func TestFieldEffectiveKindPreservesLegacyModes(t *testing.T) {
 		t.Fatalf("suggest field kind = %v, want KindChoice", got)
 	}
 }
+
+
+func TestInputMulti(t *testing.T) {
+	cases := []struct {
+		name string
+		in   registry.Input
+		key  string
+		want []string
+	}{
+		{"empty", registry.Input{}, "x", nil},
+		{"single", registry.Input{"x": "a"}, "x", []string{"a"}},
+		{"two", registry.Input{"x": "a,b"}, "x", []string{"a", "b"}},
+		{"trim whitespace", registry.Input{"x": "a, b , c"}, "x", []string{"a", "b", "c"}},
+		{"drop empty", registry.Input{"x": "a,,b,"}, "x", []string{"a", "b"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := c.in.Multi(c.key)
+			if len(got) != len(c.want) {
+				t.Fatalf("Multi(%q) = %v; want %v", c.key, got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("Multi(%q)[%d] = %q; want %q", c.key, i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}

@@ -62,10 +62,11 @@ type model struct {
 	spin              spinner.Model
 	loading           bool
 	choices           []registry.Choice
-	selIdx            int      // cursor for selection list
-	committed         []string // rendered lines for previously-answered fields
-	committedSections []string // section name for each committed line (parallel)
-	committedIdx      []int    // field index for each committed line (for goBack)
+	selIdx            int          // cursor for selection list
+	multiSel          map[int]bool // checked choice indices for the current Multi field
+	committed         []string     // rendered lines for previously-answered fields
+	committedSections []string     // section name for each committed line (parallel)
+	committedIdx      []int        // field index for each committed line (for goBack)
 	termH             int      // terminal height for scroll capping
 
 	err      error
@@ -91,6 +92,12 @@ func (m *model) curField() *registry.Field {
 func (m *model) isSelect() bool {
 	f := m.curField()
 	return f != nil && f.Suggest != nil
+}
+
+// isMulti returns true when the current field is a multi-select list.
+func (m *model) isMulti() bool {
+	f := m.curField()
+	return f != nil && f.Suggest != nil && f.Multi
 }
 
 // isFile returns true when the current field should be rendered as a file picker.
@@ -139,6 +146,7 @@ func (m *model) startField() tea.Cmd {
 	m.ti.Reset()
 	m.fp = nil
 	m.selIdx = 0
+	m.multiSel = nil
 	m.choices = nil
 	m.err = nil
 	if m.isSelect() {
@@ -303,6 +311,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, cmd
 			}
+			if m.isMulti() {
+				if m.loading {
+					return m, nil
+				}
+				// Commit the comma-joined list of checked choices in
+				// choice order. Empty selection is allowed only for
+				// non-required fields; required fields loop back and
+				// show the required error.
+				var picks []string
+				for idx, c := range m.choices {
+					if m.multiSel[idx] {
+						picks = append(picks, c.Value)
+					}
+				}
+				return m, m.commitAndAdvance(strings.Join(picks, ","))
+			}
 			if m.isSelect() {
 				if m.loading || len(m.choices) == 0 {
 					return m, nil
@@ -314,6 +338,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m, m.commitAndAdvance(val)
+		case " ":
+			// Space toggles the cursor row only for Multi fields.
+			// Regular Suggest fields ignore it (so a user who starts
+			// typing doesn't accidentally toggle a selection).
+			if m.isMulti() && !m.loading && len(m.choices) > 0 {
+				if m.multiSel == nil {
+					m.multiSel = map[int]bool{}
+				}
+				if m.multiSel[m.selIdx] {
+					delete(m.multiSel, m.selIdx)
+				} else {
+					m.multiSel[m.selIdx] = true
+				}
+				return m, nil
+			}
 		case "up", "k":
 			if m.isSelect() && m.selIdx > 0 {
 				m.selIdx--
@@ -359,10 +398,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				want = fmt.Sprintf("%v", f.Default)
 			}
 			if want != "" {
-				for i, c := range m.choices {
-					if c.Value == want {
-						m.selIdx = i
-						break
+				if m.isMulti() {
+					// Comma-split the seed and pre-check matching choices
+					// so a resumed wizard shows the previous picks.
+					set := map[string]bool{}
+					for _, v := range strings.Split(want, ",") {
+						v = strings.TrimSpace(v)
+						if v != "" {
+							set[v] = true
+						}
+					}
+					sel := map[int]bool{}
+					for i, c := range m.choices {
+						if set[c.Value] {
+							sel[i] = true
+						}
+					}
+					if len(sel) > 0 {
+						m.multiSel = sel
+					}
+				} else {
+					for i, c := range m.choices {
+						if c.Value == want {
+							m.selIdx = i
+							break
+						}
 					}
 				}
 			}
@@ -488,10 +548,16 @@ func (m *model) renderChoices() string {
 	if len(m.choices) == 0 {
 		return theme.MutedText.Render("  (no options available)") + "\n"
 	}
+	multi := m.isMulti()
 	var s string
 	// Show column headers if the first choice has Help (used as header by SuggestFrom).
 	if m.choices[0].Help != "" {
-		s += "  " + theme.Label.Render(m.choices[0].Help) + "\n"
+		indent := "  "
+		if multi {
+			// Align header with the checkbox column below.
+			indent = "      "
+		}
+		s += indent + theme.Label.Render(m.choices[0].Help) + "\n"
 	}
 	// Cap visible choices to fit the terminal with a scroll window.
 	maxVisible := len(m.choices)
@@ -523,22 +589,40 @@ func (m *model) renderChoices() string {
 		line := c.Display
 		if line == "" {
 			line = c.Value
-			if c.Help != "" {
+			if !multi && c.Help != "" {
 				line += theme.MutedText.Render("  " + c.Help)
 			}
 		}
-		if i == m.selIdx {
+		switch {
+		case multi:
+			box := "[ ]"
+			if m.multiSel[i] {
+				box = theme.Value.Render("[x]")
+			}
+			if i == m.selIdx {
+				s += theme.Key.Render("▸") + " " + box + " " + theme.Value.Render(line) + "\n"
+			} else {
+				s += "  " + box + " " + line + "\n"
+			}
+		case i == m.selIdx:
 			s += theme.Key.Render("▸") + " " + theme.Value.Render(line) + "\n"
-		} else {
+		default:
 			s += "  " + line + "\n"
 		}
 	}
 	if end < len(m.choices) {
 		s += theme.MutedText.Render(fmt.Sprintf("  ↓ %d more", len(m.choices)-end)) + "\n"
 	}
-	hint := "  ↑/↓ select · enter confirm · esc cancel"
-	if f := m.curField(); f != nil && !f.Required {
-		hint = "  ↑/↓ select · enter confirm · tab skip · esc cancel"
+	var hint string
+	switch {
+	case multi:
+		n := len(m.multiSel)
+		hint = fmt.Sprintf("  %d selected · space toggle · ↑/↓ move · enter confirm · esc cancel", n)
+	default:
+		hint = "  ↑/↓ select · enter confirm · esc cancel"
+		if f := m.curField(); f != nil && !f.Required {
+			hint = "  ↑/↓ select · enter confirm · tab skip · esc cancel"
+		}
 	}
 	s += theme.MutedText.Render(hint) + "\n"
 	return s

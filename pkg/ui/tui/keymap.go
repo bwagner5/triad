@@ -37,7 +37,12 @@ type binding struct {
 	Key   string // keystroke as produced by tea.KeyPressMsg.String()
 	Label string // short description shown in help + status bar
 	Cat   string // one of: "Navigation", "Resource", "Global"
-	Run   func(a *app) (tea.Model, tea.Cmd)
+	// HideFromStatusBar, when true, keeps the binding in the "?" help
+	// overlay but omits it from the bottom status-bar hint row. Source:
+	// registry.Operation.HideFromStatusBar for resource/global ops;
+	// built-in bindings set this directly.
+	HideFromStatusBar bool
+	Run               func(a *app) (tea.Model, tea.Cmd)
 }
 
 // keyMap returns the full set of key bindings for the current screen.
@@ -98,6 +103,7 @@ func (a *app) keyMap() []binding {
 			}
 			bs = append(bs, binding{
 				Key: op.Key, Label: op.Name, Cat: "Resource",
+				HideFromStatusBar: op.HideFromStatusBar,
 				Run: func(a *app) (tea.Model, tea.Cmd) {
 					var input registry.Input
 					if needsSelection(*a.resource, op) {
@@ -122,6 +128,7 @@ func (a *app) keyMap() []binding {
 		}
 		bs = append(bs, binding{
 			Key: op.Key, Label: op.Name, Cat: "Global",
+			HideFromStatusBar: op.HideFromStatusBar,
 			Run: func(a *app) (tea.Model, tea.Cmd) {
 				return a, a.launchOp(nil, &op, nil)
 			},

@@ -598,3 +598,74 @@ func TestWizardOverlaySuggestFieldDoesNotHideItself(t *testing.T) {
 		t.Fatal("create-new-instance should be hidden when instance is pre-populated")
 	}
 }
+
+
+// TestWizardOverlayMultiSelectTogglesWithSpace verifies that the Multi
+// flag turns a Suggest field into a checkbox list: cursor moves with
+// j/k, space toggles the cursor's row, and fieldValue() returns the
+// comma-joined values of all checked rows in choice order.
+func TestWizardOverlayMultiSelectTogglesWithSpace(t *testing.T) {
+	wo := newWizardOverlay()
+	fields := []registry.Field{{
+		Flag:  "instances",
+		Multi: true,
+		Suggest: func(context.Context) ([]registry.Choice, error) {
+			return []registry.Choice{
+				{Value: "alpha"}, {Value: "bravo"}, {Value: "charlie"},
+			}, nil
+		},
+	}}
+	_ = wo.Show(context.Background(), nil, &registry.Operation{Name: "test"}, fields, registry.Input{})
+	choices, _ := fields[0].Suggest(context.Background())
+	wo.Update(wizardSuggestMsg{idx: 0, choices: choices})
+
+	if !wo.isMulti(0) {
+		t.Fatal("isMulti(0) = false; want true")
+	}
+
+	// Space on first row selects alpha.
+	wo.handleKey(keyMsg(" "))
+	if got := wo.fieldValue(0); got != "alpha" {
+		t.Errorf("after first space, fieldValue = %q; want alpha", got)
+	}
+
+	// j moves cursor, space selects bravo.
+	wo.handleKey(keyMsg("j"))
+	wo.handleKey(keyMsg(" "))
+	if got := wo.fieldValue(0); got != "alpha,bravo" {
+		t.Errorf("after second space, fieldValue = %q; want alpha,bravo", got)
+	}
+
+	// Space again on bravo removes it.
+	wo.handleKey(keyMsg(" "))
+	if got := wo.fieldValue(0); got != "alpha" {
+		t.Errorf("after toggle-off, fieldValue = %q; want alpha", got)
+	}
+}
+
+// TestWizardOverlayMultiSelectSeedsFromInput verifies that a Multi
+// field pre-populated in Input with a comma-separated value renders
+// with those choices checked.
+func TestWizardOverlayMultiSelectSeedsFromInput(t *testing.T) {
+	wo := newWizardOverlay()
+	fields := []registry.Field{{
+		Flag:  "instances",
+		Multi: true,
+		Suggest: func(context.Context) ([]registry.Choice, error) {
+			return []registry.Choice{
+				{Value: "alpha"}, {Value: "bravo"}, {Value: "charlie"},
+			}, nil
+		},
+	}}
+	_ = wo.Show(context.Background(), nil, &registry.Operation{Name: "test"},
+		fields, registry.Input{"instances": "alpha,charlie"})
+	choices, _ := fields[0].Suggest(context.Background())
+	wo.Update(wizardSuggestMsg{idx: 0, choices: choices})
+
+	if got := wo.fieldValue(0); got != "alpha,charlie" {
+		t.Errorf("seeded fieldValue = %q; want alpha,charlie", got)
+	}
+	if !wo.multiSel[0][0] || wo.multiSel[0][1] || !wo.multiSel[0][2] {
+		t.Errorf("multiSel = %v; want {0:true, 2:true}", wo.multiSel[0])
+	}
+}

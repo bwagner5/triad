@@ -108,6 +108,15 @@ type app struct {
 	seenGen int
 	spin    spinner.Model
 
+	// async is the store for Field.Async results, keyed by
+	// (resource, primary key, field name). Loaders run in goroutines
+	// spawned after each refresh; the TUI renders the spinner for
+	// cells whose entry is loading-and-never-succeeded, and shows the
+	// last known value for cells that have succeeded at least once
+	// (even across refreshes) — the column never flashes back to the
+	// spinner once data has been seen.
+	async map[asyncKey]*asyncState
+
 	// Toast flash messages (top of screen).
 	toast *toast
 
@@ -155,7 +164,7 @@ func newApp(ctx context.Context, reg *registry.Registry, opts Options) *app {
 	if opts.Logo == "" {
 		opts.Logo = lipgloss.NewStyle().Foreground(theme.Warning).Render(ascii.Render(opts.Name))
 	}
-	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), bus: runtime.NewBus(), palette: newPalette(reg, opts.GlobalOps), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New(), initialLoad: true}
+	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), bus: runtime.NewBus(), palette: newPalette(reg, opts.GlobalOps), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New(), initialLoad: true, async: map[asyncKey]*asyncState{}}
 	fti := textinput.New()
 	fti.Prompt = "/ "
 	fti.Placeholder = "filter…"
@@ -175,9 +184,43 @@ type itemsMsg struct {
 	items    []any
 	err      error
 	streamed bool                  // true when this is a partial batch from StreamList (append, don't replace)
+	replace  bool                  // true when items should merge-by-primary-key into the existing table (Batch.Replace)
 	final    bool                  // true when streaming is complete
 	next     <-chan registry.Batch // when non-nil, caller should read another batch from it
 	gen      int                   // stream generation; handleItems drops stale msgs
+}
+
+// asyncKey identifies one async-field cell (resource, row-PK, field-name).
+// Used as a map key for the async-load state so callers can update an
+// individual cell without touching the rest of the row.
+type asyncKey struct {
+	resource string
+	pk       string
+	field    string
+}
+
+// asyncState is the per-cell state for a Field.Async loader.
+//
+// Lifecycle per cell:
+//   - fresh cell, never loaded: loading=true, loaded=false — cell shows
+//     the spinner.
+//   - loader succeeded at least once: loaded=true, value set — cell
+//     shows value. A subsequent refresh flips loading=true transiently
+//     but the cell keeps rendering the old value (no flash).
+//   - loader returned error: loaded=true, err set — cell shows "—".
+type asyncState struct {
+	value   string
+	loading bool
+	loaded  bool
+	err     error
+}
+
+// asyncFieldMsg is emitted by an async-field loader goroutine when its
+// Async callback returns. The TUI merges it into a.async.
+type asyncFieldMsg struct {
+	key   asyncKey
+	value string
+	err   error
 }
 type sagaEventMsg runtime.Event
 
@@ -227,8 +270,8 @@ func (a *app) readStream(name string, ch <-chan registry.Batch, gen int) tea.Cmd
 			trace.Trace(a.ctx, "tui stream final", "resource", name, "gen", gen)
 			return itemsMsg{resource: name, streamed: true, final: true, gen: gen}
 		}
-		trace.Trace(a.ctx, "tui stream batch", "resource", name, "items", len(b.Items), "err", b.Err, "gen", gen)
-		return itemsMsg{resource: name, items: b.Items, err: b.Err, streamed: true, next: ch, gen: gen}
+		trace.Trace(a.ctx, "tui stream batch", "resource", name, "items", len(b.Items), "err", b.Err, "replace", b.Replace, "gen", gen)
+		return itemsMsg{resource: name, items: b.Items, err: b.Err, streamed: true, replace: b.Replace, next: ch, gen: gen}
 	}
 }
 
@@ -254,7 +297,7 @@ func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 		}
 		a.lastRefresh = time.Now()
 		a.nextRefresh = a.lastRefresh.Add(a.sched.Interval(a.resource.Name))
-		return a, a.scheduleRefresh()
+		return a, tea.Batch(append(a.scheduleAsyncLoads(), a.scheduleRefresh())...)
 	}
 	// Streaming: first batch of a new gen replaces; subsequent batches
 	// append. Keeps the old table stable during refresh — rows disappear
@@ -267,11 +310,24 @@ func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(cmds...)
 	}
 	if len(msg.items) > 0 {
-		if msg.gen != a.seenGen {
+		switch {
+		case msg.replace:
+			// Merge-by-primary-key: Replace batches update the Status /
+			// Endpoints / etc. columns of rows already shipped via an
+			// earlier bare batch in the same gen. Matching is by the
+			// first Field of the resource (convention: "Name"). Items
+			// with no match fall through to append so a late-arriving
+			// row (e.g. a region that finished after its bare batch was
+			// expected) isn't silently dropped.
+			a.items = mergeByPrimaryKey(a.items, msg.items, a.resource)
+			// Don't touch a.seenGen: a Replace batch is an update, not
+			// the first shipment of a new gen. seenGen flips when a
+			// non-Replace batch arrives (the bare ship).
+		case msg.gen != a.seenGen:
 			// First batch of a fresh cycle: replace the old table.
 			a.items = append(a.items[:0], msg.items...)
 			a.seenGen = msg.gen
-		} else {
+		default:
 			a.items = append(a.items, msg.items...)
 		}
 	} else if msg.final && msg.gen != a.seenGen {
@@ -285,13 +341,156 @@ func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 		a.initialLoad = false
 		a.lastRefresh = time.Now()
 		a.nextRefresh = a.lastRefresh.Add(a.sched.Interval(a.resource.Name))
-		return a, a.scheduleRefresh()
+		return a, tea.Batch(append(a.scheduleAsyncLoads(), a.scheduleRefresh())...)
 	}
 	if msg.next != nil {
 		return a, a.readStream(msg.resource, msg.next, msg.gen)
 	}
 	return a, nil
 }
+
+// scheduleAsyncLoads returns a batch of tea.Cmds — one per (row, async
+// field) in the current table whose loader isn't already in flight. Each
+// cmd runs Async in the bubbletea worker pool; on completion it emits an
+// asyncFieldMsg back into Update.
+//
+// Safe to call on every table update (refresh, replace-merge, tick): the
+// "already loading" guard ensures we don't pile up N-per-refresh loaders
+// for the same cell. Cells whose loader previously failed get re-tried
+// on subsequent refreshes — that's why loaded=true + err != nil doesn't
+// inhibit scheduling.
+func (a *app) scheduleAsyncLoads() []tea.Cmd {
+	if a.resource == nil || len(a.items) == 0 {
+		return nil
+	}
+	pk := primaryKeyField(a.resource)
+	if pk == nil {
+		return nil
+	}
+	// Collect async fields once per call — most resources have <= a
+	// handful and the slice is small.
+	var asyncFields []registry.Field
+	for _, f := range a.resource.Fields {
+		if f.Async != nil {
+			asyncFields = append(asyncFields, f)
+		}
+	}
+	if len(asyncFields) == 0 {
+		return nil
+	}
+	var cmds []tea.Cmd
+	for _, item := range a.items {
+		pkVal := readField(reflectIndirect(item), *pk)
+		if pkVal == "" {
+			continue // no stable identity → skip async for this row
+		}
+		for _, f := range asyncFields {
+			k := asyncKey{resource: a.resource.Name, pk: pkVal, field: f.Name}
+			st, ok := a.async[k]
+			if !ok {
+				st = &asyncState{loading: true}
+				a.async[k] = st
+			} else if st.loading {
+				continue // already in flight; let it finish
+			} else {
+				st.loading = true
+			}
+			// Capture loop vars.
+			load := f.Async
+			key := k
+			row := item
+			cmds = append(cmds, func() tea.Msg {
+				v, err := load(a.ctx, row)
+				return asyncFieldMsg{key: key, value: v, err: err}
+			})
+		}
+	}
+	return cmds
+}
+
+// renderAsyncCell returns the cell string for an async field. The rules:
+//
+//   - Have a successful value: show it. Subsequent loads never replace it
+//     until they succeed — so a slow refresh doesn't flash the cell back
+//     to the spinner.
+//   - Loader errored and we have no prior value: show a muted "—".
+//   - Loader is in flight (or never started, shouldn't happen post-
+//     scheduleAsyncLoads): show the animated spinner.
+func (a *app) renderAsyncCell(pk string, f registry.Field) string {
+	st := a.async[asyncKey{resource: a.resource.Name, pk: pk, field: f.Name}]
+	switch {
+	case st == nil:
+		// Loader hasn't been scheduled yet (window between new items
+		// arriving and scheduleAsyncLoads running). Same treatment as
+		// "in flight" — show the spinner so the cell is never blank.
+		return a.spin.View()
+	case st.value != "":
+		return st.value
+	case st.err != nil:
+		return theme.MutedText.Render("—")
+	default:
+		return a.spin.View()
+	}
+}
+
+// handleAsyncField merges an async-loader result back into a.async.
+func (a *app) handleAsyncField(msg asyncFieldMsg) (tea.Model, tea.Cmd) {
+	st, ok := a.async[msg.key]
+	if !ok {
+		st = &asyncState{}
+		a.async[msg.key] = st
+	}
+	st.loading = false
+	st.loaded = true
+	st.err = msg.err
+	if msg.err == nil {
+		st.value = msg.value
+	} else {
+		trace.Trace(a.ctx, "async field load failed",
+			"resource", msg.key.resource, "pk", msg.key.pk, "field", msg.key.field, "err", msg.err)
+	}
+	return a, nil
+}
+
+// primaryKeyField returns the Resource field used as the row identity for
+// Replace-style merges. The convention is "first declared Field" — every
+// Resource puts its name-ish primary column first (App.Name, Instance.Name,
+// etc.). Returns nil if the resource has no fields (degenerate; caller
+// falls back to append semantics).
+func primaryKeyField(res *registry.Resource) *registry.Field {
+	if res == nil || len(res.Fields) == 0 {
+		return nil
+	}
+	return &res.Fields[0]
+}
+
+// mergeByPrimaryKey returns a slice where each item in updates has replaced
+// the matching-by-primary-key entry in existing; items with no match are
+// appended. Order of existing is preserved; unmatched updates are appended
+// in the order they appear. Used by Replace batches in handleItems.
+func mergeByPrimaryKey(existing, updates []any, res *registry.Resource) []any {
+	pk := primaryKeyField(res)
+	if pk == nil {
+		// Nothing to match on — fall back to append so data isn't lost.
+		return append(existing, updates...)
+	}
+	idx := make(map[string]int, len(existing))
+	for i, it := range existing {
+		idx[readField(reflectIndirect(it), *pk)] = i
+	}
+	out := append([]any(nil), existing...)
+	for _, u := range updates {
+		key := readField(reflectIndirect(u), *pk)
+		if i, ok := idx[key]; ok {
+			out[i] = u
+			continue
+		}
+		idx[key] = len(out)
+		out = append(out, u)
+	}
+	return out
+}
+
 
 func (a *app) scheduleRefresh() tea.Cmd {
 	if a.resource == nil {
@@ -373,6 +572,8 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.spin, cmd = a.spin.Update(msg)
 		return a, cmd
+	case asyncFieldMsg:
+		return a.handleAsyncField(msg)
 	}
 	// Route unhandled messages to review overlay when active.
 	if a.review.Active() {
@@ -524,8 +725,12 @@ func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
 		a.confirm.Show(msg.op.Confirm, msg.resource, msg.op, msg.input)
 		return a, nil
 	}
-	// Run op collected via the wizard overlay: invoke Run in-process and
-	// synthesize an actionDoneMsg so the TUI refreshes + surfaces errors.
+	// Run op collected via the wizard overlay: invoke Run via tea.Exec
+	// so the subprocess gets a real TTY (bubbletea releases stdin/stdout
+	// and re-acquires on return). Running in-process here would leave
+	// bubbletea in raw-mode owning stdin while the Run's subprocess
+	// tries to stream to the terminal — broken for any op that execs
+	// ssh, a pager, an editor, etc.
 	if msg.op != nil && msg.op.Run != nil && len(msg.op.Steps) == 0 {
 		op := msg.op
 		input := msg.input
@@ -533,11 +738,11 @@ func (a *app) handleWizardDone(msg wizardDoneMsg) (tea.Model, tea.Cmd) {
 		// state persists forever because nothing else dismisses it on
 		// the Run path (saga paths call Clear inside startSaga).
 		a.wizard.Clear()
-		return a, func() tea.Msg {
-			err := op.Run(a.ctx, input)
+		cmd := &actionExec{ctx: a.ctx, missing: nil, input: input, op: op}
+		return a, tea.Exec(cmd, func(err error) tea.Msg {
 			trace.Trace(a.ctx, "tui wizard done run", "op", op.Name, "err", err)
 			return actionDoneMsg{err: err}
-		}
+		})
 	}
 	return a, func() tea.Msg {
 		return startSagaMsg{resource: msg.resource, op: msg.op, input: msg.input}
@@ -1049,14 +1254,24 @@ func (a *app) renderTable(items []any, maxRows, maxW int) string {
 	var rows [][]string
 	cursorRow := -1
 	now := time.Now()
+	pk := primaryKeyField(a.resource)
 	for i := start; i < end; i++ {
 		rv := reflectIndirect(items[i])
+		var pkVal string
+		if pk != nil {
+			pkVal = readField(rv, *pk)
+		}
 		row := make([]string, len(fields))
 		for j, f := range fields {
-			val := readField(rv, f)
-			if f.Table.Tick && val != "" {
-				if t, err := time.Parse(time.RFC3339, val); err == nil {
-					val = duration.Short(now.Sub(t))
+			var val string
+			if f.Async != nil && pkVal != "" {
+				val = a.renderAsyncCell(pkVal, f)
+			} else {
+				val = readField(rv, f)
+				if f.Table.Tick && val != "" {
+					if t, err := time.Parse(time.RFC3339, val); err == nil {
+						val = duration.Short(now.Sub(t))
+					}
 				}
 			}
 			row[j] = val
@@ -1103,9 +1318,14 @@ func (a *app) renderBottom(w int) string {
 
 	// Build key hints from the dynamic key map, keeping resource + global
 	// bindings on the status bar (Navigation is implicit / too numerous).
+	// Ops that opted into HideFromStatusBar are omitted here but remain
+	// available via the "?" help overlay and the command palette.
 	var keys []string
 	for _, b := range a.keyMap() {
 		if b.Cat == "Navigation" {
+			continue
+		}
+		if b.HideFromStatusBar {
 			continue
 		}
 		keys = append(keys, theme.Key.Render("<"+b.Key+">")+" "+b.Label)

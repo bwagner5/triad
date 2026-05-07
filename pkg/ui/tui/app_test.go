@@ -42,6 +42,56 @@ func (fakeStore) List(_ context.Context, _ registry.Filter) ([]any, error) {
 }
 func ptr[T any](v T) *T { return &v }
 
+// TestHideFromStatusBar_RemovesFromBarButKeepsInHelp is a regression
+// guard: an operation that opted into HideFromStatusBar must NOT
+// appear in the bottom status-bar hint row, but MUST still appear in
+// the "?" help overlay (and remain key-dispatchable + palette-listed).
+func TestHideFromStatusBar_RemovesFromBarButKeepsInHelp(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{
+		Name: "thing", Plural: "things", Store: fakeStore{},
+		Operations: map[string]registry.Operation{
+			"create": {
+				Name: "create", Key: "c",
+				HideFromStatusBar: true,
+				Steps:             []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
+			},
+			"deploy": {
+				Name: "deploy", Key: "d",
+				Steps: []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
+			},
+		},
+	})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 160, Height: 30})
+
+	// Bottom status bar: visible ops only.
+	plain := stripANSI(m.(*app).View().Content)
+	lines := strings.Split(plain, "\n")
+	if len(lines) == 0 {
+		t.Fatal("empty render")
+	}
+	last := lines[len(lines)-1]
+	if strings.Contains(last, "create") {
+		t.Errorf("bottom bar should NOT contain 'create':\n%s", last)
+	}
+	if !strings.Contains(last, "deploy") {
+		t.Errorf("bottom bar should contain 'deploy':\n%s", last)
+	}
+
+	// "?" help overlay: must list every binding, including hidden ones.
+	m, _ = m.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	withHelp := stripANSI(m.(*app).View().Content)
+	if !strings.Contains(withHelp, "create") {
+		t.Errorf("help overlay missing 'create':\n%s", withHelp)
+	}
+	if !strings.Contains(withHelp, "deploy") {
+		t.Errorf("help overlay missing 'deploy':\n%s", withHelp)
+	}
+}
+
 // TestHelpOverlayCentered asserts the help modal is roughly centered in both
 // axes when toggled.
 func TestHelpOverlayCentered(t *testing.T) {
@@ -390,3 +440,131 @@ func TestTickInDetailModeRefetchesDetail(t *testing.T) {
 		t.Errorf("expected at least one Get after tick in detail mode; got %d", got)
 	}
 }
+
+// TestMergeByPrimaryKey exercises the merge-by-first-field logic that
+// backs Batch.Replace in the TUI.
+func TestMergeByPrimaryKey(t *testing.T) {
+	type row struct {
+		Name   string
+		Status string
+	}
+	res := &registry.Resource{
+		Fields: []registry.Field{
+			{Name: "Name"},
+			{Name: "Status"},
+		},
+	}
+
+	t.Run("updates_existing_row", func(t *testing.T) {
+		existing := []any{row{Name: "a", Status: "loading…"}, row{Name: "b", Status: "loading…"}}
+		updates := []any{row{Name: "a", Status: "healthy"}}
+		got := mergeByPrimaryKey(existing, updates, res)
+		if len(got) != 2 {
+			t.Fatalf("want 2, got %d", len(got))
+		}
+		if got[0].(row).Status != "healthy" {
+			t.Errorf("row 'a' not updated: %+v", got[0])
+		}
+		if got[1].(row).Status != "loading…" {
+			t.Errorf("row 'b' should be untouched: %+v", got[1])
+		}
+	})
+
+	t.Run("appends_unmatched_row", func(t *testing.T) {
+		existing := []any{row{Name: "a", Status: "loading…"}}
+		updates := []any{row{Name: "b", Status: "healthy"}}
+		got := mergeByPrimaryKey(existing, updates, res)
+		if len(got) != 2 {
+			t.Fatalf("want 2, got %d", len(got))
+		}
+		if got[1].(row).Name != "b" {
+			t.Errorf("unmatched row not appended: %+v", got)
+		}
+	})
+
+	t.Run("preserves_existing_order", func(t *testing.T) {
+		existing := []any{
+			row{Name: "c", Status: "loading…"},
+			row{Name: "a", Status: "loading…"},
+			row{Name: "b", Status: "loading…"},
+		}
+		updates := []any{row{Name: "a", Status: "healthy"}}
+		got := mergeByPrimaryKey(existing, updates, res)
+		if got[0].(row).Name != "c" || got[1].(row).Name != "a" || got[2].(row).Name != "b" {
+			t.Errorf("order lost: %+v", got)
+		}
+	})
+
+	t.Run("empty_updates_is_noop", func(t *testing.T) {
+		existing := []any{row{Name: "a", Status: "loading…"}}
+		got := mergeByPrimaryKey(existing, nil, res)
+		if len(got) != 1 || got[0].(row).Name != "a" {
+			t.Errorf("want unchanged single row, got %+v", got)
+		}
+	})
+
+	t.Run("no_fields_falls_back_to_append", func(t *testing.T) {
+		existing := []any{row{Name: "a"}}
+		updates := []any{row{Name: "a"}}
+		got := mergeByPrimaryKey(existing, updates, &registry.Resource{})
+		if len(got) != 2 {
+			t.Fatalf("expected append fallback, got %d", len(got))
+		}
+	})
+}
+
+// TestRenderAsyncCell exercises the four states a Field.Async cell can
+// render in. Focused on the branch logic — the actual spinner frame
+// output varies by bubbletea version, so we just assert "not empty".
+func TestRenderAsyncCell(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{
+		Name:    "thing",
+		Plural:  "things",
+		Fields:  []registry.Field{{Name: "Name"}},
+		Store:   fakeStore{},
+	})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	f := registry.Field{Name: "Status", Async: func(_ context.Context, _ any) (string, error) { return "", nil }}
+
+	// Missing entry → spinner.
+	if got := a.renderAsyncCell("row-a", f); got == "" {
+		t.Errorf("missing entry: want spinner, got empty")
+	}
+
+	// Loaded with value → value, regardless of loading flag.
+	a.async[asyncKey{resource: "thing", pk: "row-b", field: "Status"}] = &asyncState{
+		value: "dev: 1/1", loaded: true,
+	}
+	if got := a.renderAsyncCell("row-b", f); got != "dev: 1/1" {
+		t.Errorf("loaded value: got %q want 'dev: 1/1'", got)
+	}
+
+	// Stale reload: value still present, loading=true — must keep value.
+	a.async[asyncKey{resource: "thing", pk: "row-b", field: "Status"}].loading = true
+	if got := a.renderAsyncCell("row-b", f); got != "dev: 1/1" {
+		t.Errorf("reload with prior value: got %q want persistent 'dev: 1/1'", got)
+	}
+
+	// Error with no prior value → muted dash.
+	a.async[asyncKey{resource: "thing", pk: "row-c", field: "Status"}] = &asyncState{
+		loaded: true, err: errTest,
+	}
+	got := a.renderAsyncCell("row-c", f)
+	if !strings.Contains(stripANSI(got), "—") {
+		t.Errorf("error branch: got %q want to contain '—'", got)
+	}
+
+	// Still-loading (not yet succeeded) → spinner (non-empty, no value).
+	a.async[asyncKey{resource: "thing", pk: "row-d", field: "Status"}] = &asyncState{loading: true}
+	if got := a.renderAsyncCell("row-d", f); got == "" {
+		t.Errorf("in-flight: want spinner, got empty")
+	}
+}
+
+var errTest = errForTest("boom")
+
+type errForTest string
+
+func (e errForTest) Error() string { return string(e) }

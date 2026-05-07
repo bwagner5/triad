@@ -108,6 +108,14 @@ type Field struct {
 	AllowedExts []string
 	Sensitive   bool
 	Table       TableHint
+	// Multi, when true, turns a Suggest-backed field into a multi-select
+	// list. The wizard renders each choice with a checkbox; space toggles
+	// the cursor's selection, enter confirms and advances. The committed
+	// Input value is the comma-joined list of selected Choice.Value
+	// strings. Callers consume it via Input.Multi(flag).
+	//
+	// Non-Suggest fields ignore this flag.
+	Multi bool
 	// Wizard controls whether the field appears in the interactive wizard.
 	// Defaults to true (shown). Set to false for system fields (e.g.
 	// auto-resolved region, tuning knobs) that should not be prompted.
@@ -118,6 +126,25 @@ type Field struct {
 	// Suggest returns dynamic choices (e.g. from a backend). May block;
 	// UIs will render a spinner while it runs.
 	Suggest func(ctx context.Context) ([]Choice, error)
+	// Async, when non-nil, marks this field as a remote-loaded cell in
+	// list views. The Store is NOT expected to populate it in List /
+	// StreamList / Get — the TUI runs Async(ctx, item) in a background
+	// goroutine after each refresh, renders a spinner in the cell while
+	// the call is in flight, and swaps the returned string into place
+	// on completion.
+	//
+	// Refresh semantics: each refresh re-runs Async for every visible
+	// row, but the last successful value stays in the cell until the
+	// new one arrives. The column never flashes back to "loading" once
+	// data has been seen at least once.
+	//
+	// Errors are logged at trace level and the cell falls back to a
+	// muted "—" sentinel until the next successful load. The ctx
+	// supplied to Async is the caller's, wrapped with a safety
+	// deadline — loaders do not need their own timeouts but MUST
+	// respect ctx cancellation to avoid leaking goroutines at
+	// shutdown.
+	Async func(ctx context.Context, item any) (string, error)
 }
 
 // EffectiveKind returns the field's explicit kind, preserving the existing
@@ -248,6 +275,27 @@ func (i Input) Duration(k string) (time.Duration, error) {
 // Has reports whether key k has been set (even if empty).
 func (i Input) Has(k string) bool { _, ok := i[k]; return ok }
 
+// Multi parses k as a comma-separated list. Empty values produce an
+// empty slice (not nil-semantic: callers should range it directly).
+// Surrounding whitespace around each entry is trimmed and empty
+// entries are dropped so accidental trailing commas don't
+// materialize phantom elements.
+func (i Input) Multi(k string) []string {
+	v := i.Get(k)
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := parts[:0]
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // Filter is passed to Store.List. Free-form; stores interpret fields they care about.
 type Filter struct {
 	NameLike string
@@ -313,9 +361,20 @@ type StreamStore interface {
 }
 
 // Batch is one increment in a StreamStore's output.
+//
+// Replace changes the UI's merge behavior for this batch:
+//   - false (default): items are appended to the existing table, as described
+//     in StreamStore's contract. Use for the first (and subsequent) pages of
+//     a multi-region fan-out.
+//   - true: items are merged into the existing table by their primary key
+//     (the first Field declared on the Resource — by convention "Name"). Any
+//     Item whose key matches an existing row replaces that row; items with
+//     no match are appended. Use to stream enriched updates over already-
+//     shipped bare rows (e.g. "here's the app list; Status will follow").
 type Batch struct {
-	Items []any
-	Err   error // non-nil = best-effort partial failure (e.g. one region); UI shows as toast
+	Items   []any
+	Err     error // non-nil = best-effort partial failure (e.g. one region); UI shows as toast
+	Replace bool
 }
 
 // State is passed between saga steps. Input is the user's parsed input;
@@ -400,6 +459,13 @@ type Operation struct {
 	// returned by Store.List). Return false to hide the key binding and
 	// grey it out in help. Nil means always enabled.
 	Enabled func(item any) bool
+	// HideFromStatusBar, when true, omits this operation from the
+	// bottom status-bar hint row but keeps it in the "?" help overlay
+	// and in the command palette. Use for operations whose key binding
+	// is still useful to surface but that would clutter the always-on
+	// status bar (e.g. a resource "create" key when most interactions
+	// happen on existing rows).
+	HideFromStatusBar bool
 }
 
 // Resource is the central declaration that drives all three UIs.

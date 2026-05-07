@@ -32,6 +32,10 @@ type wizardOverlay struct {
 	loading []bool              // per-field loading state
 	choices [][]registry.Choice // per-field choices
 	selIdx  []int               // per-field selection cursor
+	// multiSel tracks selected choice indices for Multi fields.
+	// nil for non-Multi fields. Mutations go through toggleMulti
+	// so fieldValue can commit a stable, sorted, comma-joined result.
+	multiSel []map[int]bool
 
 	errs []string // per-field validation error
 	// busy is true after submit() while we wait for the saga or next
@@ -72,6 +76,7 @@ func (wo *wizardOverlay) ShowWithPreamble(ctx context.Context, res *registry.Res
 	wo.loading = make([]bool, n)
 	wo.choices = make([][]registry.Choice, n)
 	wo.selIdx = make([]int, n)
+	wo.multiSel = make([]map[int]bool, n)
 	wo.errs = make([]string, n)
 
 	var cmds []tea.Cmd
@@ -141,6 +146,7 @@ func (wo *wizardOverlay) Clear() {
 	wo.inputs = nil
 	wo.pickers = nil
 	wo.choices = nil
+	wo.multiSel = nil
 	wo.errs = nil
 	wo.preamble = ""
 	wo.preambleScroll = 0
@@ -148,6 +154,28 @@ func (wo *wizardOverlay) Clear() {
 
 func (wo *wizardOverlay) isSelect(i int) bool {
 	return i < len(wo.fields) && wo.fields[i].Suggest != nil
+}
+
+// isMulti reports whether field i is a multi-select Suggest field.
+func (wo *wizardOverlay) isMulti(i int) bool {
+	return wo.isSelect(i) && wo.fields[i].Multi
+}
+
+// toggleMulti flips the selected state of choice `choiceIdx` for field i.
+// Allocates the set on first use so fieldValue can distinguish "never
+// touched" from "explicitly empty".
+func (wo *wizardOverlay) toggleMulti(i, choiceIdx int) {
+	if i >= len(wo.multiSel) {
+		return
+	}
+	if wo.multiSel[i] == nil {
+		wo.multiSel[i] = map[int]bool{}
+	}
+	if wo.multiSel[i][choiceIdx] {
+		delete(wo.multiSel[i], choiceIdx)
+	} else {
+		wo.multiSel[i][choiceIdx] = true
+	}
 }
 
 func (wo *wizardOverlay) isFile(i int) bool {
@@ -381,6 +409,19 @@ func (wo *wizardOverlay) validateField(i int) error {
 var errRequired = fmt.Errorf("required")
 
 func (wo *wizardOverlay) fieldValue(i int) string {
+	if wo.isMulti(i) {
+		if i >= len(wo.multiSel) || len(wo.multiSel[i]) == 0 {
+			return ""
+		}
+		// Emit in choice order (not selection order) for stable output.
+		var picks []string
+		for idx, c := range wo.choices[i] {
+			if wo.multiSel[i][idx] {
+				picks = append(picks, c.Value)
+			}
+		}
+		return strings.Join(picks, ",")
+	}
 	if wo.isSelect(i) {
 		if len(wo.choices[i]) > 0 && wo.selIdx[i] < len(wo.choices[i]) {
 			return wo.choices[i][wo.selIdx[i]].Value
@@ -492,10 +533,33 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 					want = fmt.Sprintf("%v", f.Default)
 				}
 				if want != "" {
-					for i, c := range msg.choices {
-						if c.Value == want {
-							wo.selIdx[msg.idx] = i
-							break
+					if wo.isMulti(msg.idx) {
+						// Multi seeding: every matching value becomes a
+						// pre-checked row. Parsing here (instead of via
+						// Input.Multi) keeps this package free of import
+						// cycles on the commasplit helper.
+						set := map[string]bool{}
+						for _, v := range strings.Split(want, ",") {
+							v = strings.TrimSpace(v)
+							if v != "" {
+								set[v] = true
+							}
+						}
+						sel := map[int]bool{}
+						for i, c := range msg.choices {
+							if set[c.Value] {
+								sel[i] = true
+							}
+						}
+						if len(sel) > 0 {
+							wo.multiSel[msg.idx] = sel
+						}
+					} else {
+						for i, c := range msg.choices {
+							if c.Value == want {
+								wo.selIdx[msg.idx] = i
+								break
+							}
 						}
 					}
 				}
@@ -619,6 +683,14 @@ func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		case "k", "up":
 			if wo.selIdx[wo.idx] > 0 {
 				wo.selIdx[wo.idx]--
+			}
+			return nil
+		case " ", "space":
+			// Space toggles selection only for Multi fields.
+			// Regular Suggest fields ignore it so typing into a
+			// would-be text input isn't mistaken for selection.
+			if wo.isMulti(wo.idx) && len(wo.choices[wo.idx]) > 0 {
+				wo.toggleMulti(wo.idx, wo.selIdx[wo.idx])
 			}
 			return nil
 		case "pgup", "pgdown":
@@ -760,7 +832,20 @@ func (wo *wizardOverlay) Box(w, h int) string {
 		// Unfocused fields collapse to label + current value (one line).
 		if !focused {
 			val := wo.fieldValue(i)
-			if val == "" {
+			if wo.isMulti(i) {
+				n := 0
+				if i < len(wo.multiSel) {
+					n = len(wo.multiSel[i])
+				}
+				switch n {
+				case 0:
+					val = theme.MutedText.Render("(none selected)")
+				case 1:
+					val = val // single pick: show the value verbatim
+				default:
+					val = fmt.Sprintf("%d selected", n)
+				}
+			} else if val == "" {
 				val = theme.MutedText.Render("—")
 			}
 			body.WriteString("  " + label + "  " + val + "\n")
@@ -797,7 +882,11 @@ func (wo *wizardOverlay) Box(w, h int) string {
 		}
 	}
 
-	body.WriteString("\n" + theme.MutedText.Render("  tab/shift+tab · enter: next (or submit on last field) · esc cancel"))
+	hint := "tab/shift+tab · enter: next (or submit on last field) · esc cancel"
+	if wo.isMulti(wo.idx) {
+		hint = "space toggle · ↑/↓ move · enter: next (or submit on last field) · esc cancel"
+	}
+	body.WriteString("\n" + theme.MutedText.Render("  "+hint))
 
 	// Clamp body height to fit the terminal (border adds 2 rows).
 	rendered := body.String()
@@ -841,6 +930,7 @@ func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool, maxVisible in
 		return "  " + theme.MutedText.Render("(no options)") + "\n"
 	}
 	sel := wo.selIdx[fieldIdx]
+	multi := wo.isMulti(fieldIdx)
 
 	// Compute scroll window around the selected item.
 	start, end := 0, len(cs)
@@ -858,6 +948,12 @@ func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool, maxVisible in
 	}
 
 	var s strings.Builder
+	// Column header line (only for Multi fields where Display is a
+	// table-formatted row with a Help-formatted header). Indent
+	// matches the checkbox column below so cells line up.
+	if multi && focused && cs[0].Help != "" {
+		s.WriteString("      " + theme.Label.Render(cs[0].Help) + "\n")
+	}
 	if start > 0 {
 		s.WriteString("    " + theme.MutedText.Render(fmt.Sprintf("↑ %d more", start)) + "\n")
 	}
@@ -867,11 +963,28 @@ func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool, maxVisible in
 		line := c.Display
 		if line == "" {
 			line = c.Value
-			if c.Help != "" {
+			if !multi && c.Help != "" {
 				line += theme.MutedText.Render("  " + c.Help)
 			}
 		}
-		if i == sel {
+		// Compose the checkbox/marker column for multi mode. Keeps
+		// visual alignment across rows whether or not a choice is
+		// selected. Single-select mode preserves the pre-existing
+		// "▸ " highlight for the cursor row.
+		if multi {
+			box := "[ ]"
+			if wo.multiSel[fieldIdx][i] {
+				box = theme.Value.Render("[x]")
+			}
+			if i == sel && focused {
+				marker = "  " + theme.Key.Render("▸") + " " + box + " "
+				line = theme.Value.Render(line)
+			} else if i == sel {
+				marker = "  › " + box + " "
+			} else {
+				marker = "    " + box + " "
+			}
+		} else if i == sel {
 			if focused {
 				marker = "  " + theme.Key.Render("▸ ")
 				line = theme.Value.Render(line)
@@ -883,6 +996,12 @@ func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool, maxVisible in
 	}
 	if end < len(cs) {
 		s.WriteString("    " + theme.MutedText.Render(fmt.Sprintf("↓ %d more", len(cs)-end)) + "\n")
+	}
+	// Footer hint tailored to multi vs single. Rendered only for the
+	// focused field so unfocused collapsed rows stay compact.
+	if focused && multi {
+		n := len(wo.multiSel[fieldIdx])
+		s.WriteString("  " + theme.MutedText.Render(fmt.Sprintf("%d selected · space toggle · enter confirm", n)) + "\n")
 	}
 	return s.String()
 }
