@@ -231,3 +231,97 @@ func TestBusUnsubscribeClosesChannel(t *testing.T) {
 	// Publishing after unsubscribe should not panic.
 	bus.Publish(runtime.Event{Saga: "after"})
 }
+
+// ---- Category propagation ----
+
+// TestEventCategoryPropagates asserts that a Step's Category string lands
+// on every runtime.Event emitted for that step (Running, terminal status,
+// Skipped, NeedsInput). Renderers group by Event.Category without needing
+// the back-reference to the Operation struct.
+func TestEventCategoryPropagates(t *testing.T) {
+	res := registry.Resource{Name: "thing"}
+	op := registry.Operation{Name: "create", Steps: []registry.Step{
+		{Category: "A", Label: "s1", Do: func(_ context.Context, _ *registry.State) error { return nil }},
+		{Category: "B", Label: "s2", Do: func(_ context.Context, _ *registry.State) error { return nil }},
+	}}
+	events := drain(runtime.Run(context.Background(), nil, res, op, registry.Input{}))
+	byStep := map[string]string{}
+	for _, e := range events {
+		if e.Done || e.Step == "" {
+			continue
+		}
+		// A step emits Running + OK — both must carry the same category.
+		if prev, ok := byStep[e.Step]; ok && prev != e.Category {
+			t.Errorf("step %q emitted mixed categories: %q then %q", e.Step, prev, e.Category)
+		}
+		byStep[e.Step] = e.Category
+	}
+	if byStep["s1"] != "A" {
+		t.Errorf("s1 category = %q, want %q", byStep["s1"], "A")
+	}
+	if byStep["s2"] != "B" {
+		t.Errorf("s2 category = %q, want %q", byStep["s2"], "B")
+	}
+}
+
+// TestCategoryEmptyIsFlat pins the zero-change path: a saga with no
+// Category on any step emits events where every Category == "". This
+// protects every existing saga from visual regressions until callers
+// opt in.
+func TestCategoryEmptyIsFlat(t *testing.T) {
+	res := registry.Resource{Name: "thing"}
+	op := registry.Operation{Name: "create", Steps: []registry.Step{
+		step("a", func() error { return nil }),
+		step("b", func() error { return nil }),
+	}}
+	events := drain(runtime.Run(context.Background(), nil, res, op, registry.Input{}))
+	for _, e := range events {
+		if e.Category != "" {
+			t.Errorf("event %+v: Category = %q, want \"\" (ungrouped saga)", e, e.Category)
+		}
+	}
+}
+
+// TestCategoryPropagatesThroughSkipped covers the Skipped branch, which
+// is a separate emission point in runtime.Run.
+func TestCategoryPropagatesThroughSkipped(t *testing.T) {
+	res := registry.Resource{Name: "thing"}
+	op := registry.Operation{Name: "create", Steps: []registry.Step{
+		{Category: "A", Label: "skipme",
+			Skip: func(_ *registry.State) bool { return true },
+			Do:   func(_ context.Context, _ *registry.State) error { return nil }},
+	}}
+	events := drain(runtime.Run(context.Background(), nil, res, op, registry.Input{}))
+	var skipped runtime.Event
+	for _, e := range events {
+		if e.Status == runtime.Skipped {
+			skipped = e
+			break
+		}
+	}
+	if skipped.Category != "A" {
+		t.Errorf("Skipped event Category = %q, want %q", skipped.Category, "A")
+	}
+}
+
+// TestCategoryPropagatesThroughFailure covers the Failed emission path
+// at the end of the step loop.
+func TestCategoryPropagatesThroughFailure(t *testing.T) {
+	boom := errors.New("boom")
+	res := registry.Resource{Name: "thing"}
+	op := registry.Operation{Name: "create", Steps: []registry.Step{
+		{Category: "A", Label: "x",
+			Do: func(_ context.Context, _ *registry.State) error { return boom }},
+	}}
+	events := drain(runtime.Run(context.Background(), nil, res, op, registry.Input{}))
+	var failed runtime.Event
+	for _, e := range events {
+		if e.Status == runtime.Failed && !e.Done {
+			failed = e
+			break
+		}
+	}
+	if failed.Category != "A" {
+		t.Errorf("Failed event Category = %q, want %q", failed.Category, "A")
+	}
+}

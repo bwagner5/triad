@@ -42,6 +42,215 @@ func (fakeStore) List(_ context.Context, _ registry.Filter) ([]any, error) {
 }
 func ptr[T any](v T) *T { return &v }
 
+// TestEmptyTableHidesRowDependentHints asserts the bottom status bar
+// sheds row-dependent hints (delete/logs-style ops, filter) when the
+// table has no rows — the bar should only surface actions that work
+// without a selection (refresh, global ops, palette, help, quit). The
+// hidden bindings MUST still appear in the "?" help overlay so users
+// can discover them and the keys remain dispatchable.
+func TestEmptyTableHidesRowDependentHints(t *testing.T) {
+	reg := registry.New()
+	// Resource with a primary-key field and two ops:
+	//  - "delete" needs a selected row (Suggest on the PK flag).
+	//  - "create" does not (HideFromStatusBar is already implied by
+	//    needsSelection returning false; we leave it visible to
+	//    confirm that non-row ops aren't swept up by the new rule).
+	reg.Register(registry.Resource{
+		Name: "thing", Plural: "things", Store: fakeStore{},
+		Fields: []registry.Field{
+			{Name: "Name", Flag: "name", Table: registry.TableHint{Header: "NAME"}},
+		},
+		Operations: map[string]registry.Operation{
+			"delete": {
+				Name: "delete", Key: "ctrl+d",
+				Fields: []registry.Field{
+					{Flag: "name", Required: true, Suggest: func(context.Context) ([]registry.Choice, error) { return nil, nil }},
+				},
+				Steps: []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
+			},
+		},
+	})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	// Explicit: no items, no filter — the "empty table" state.
+	a.items = nil
+	a.filterText = ""
+
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 160, Height: 30})
+
+	plain := stripANSI(m.(*app).View().Content)
+	lines := strings.Split(plain, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	last := lines[len(lines)-1]
+
+	// Must NOT advertise row-dependent hints on the bar.
+	for _, hidden := range []string{"delete", "filter"} {
+		if strings.Contains(last, hidden) {
+			t.Errorf("bottom bar should hide %q when table is empty:\n%s", hidden, last)
+		}
+	}
+	// Must still advertise the always-available actions.
+	for _, shown := range []string{"refresh", "palette", "help", "quit"} {
+		if !strings.Contains(last, shown) {
+			t.Errorf("bottom bar should keep %q when table is empty:\n%s", shown, last)
+		}
+	}
+
+	// Opening "?" must still list the hidden bindings so users can
+	// discover them.
+	m, _ = m.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	withHelp := stripANSI(m.(*app).View().Content)
+	for _, label := range []string{"delete", "filter"} {
+		if !strings.Contains(withHelp, label) {
+			t.Errorf("help overlay missing %q:\n%s", label, withHelp)
+		}
+	}
+}
+
+// TestPopulatedTableShowsRowDependentHints is the happy-path counterpart
+// to TestEmptyTableHidesRowDependentHints: once items are present the
+// bar restores the row-dependent hints.
+func TestPopulatedTableShowsRowDependentHints(t *testing.T) {
+	type row struct{ Name string }
+	reg := registry.New()
+	reg.Register(registry.Resource{
+		Name: "thing", Plural: "things", Store: fakeStore{},
+		Fields: []registry.Field{
+			{Name: "Name", Flag: "name", Table: registry.TableHint{Header: "NAME"}},
+		},
+		Operations: map[string]registry.Operation{
+			"delete": {
+				Name: "delete", Key: "ctrl+d",
+				Fields: []registry.Field{
+					{Flag: "name", Required: true, Suggest: func(context.Context) ([]registry.Choice, error) { return nil, nil }},
+				},
+				Steps: []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
+			},
+		},
+	})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	a.items = []any{row{Name: "a"}}
+	a.cursor = 0
+
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 160, Height: 30})
+
+	plain := stripANSI(m.(*app).View().Content)
+	lines := strings.Split(plain, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	last := lines[len(lines)-1]
+
+	for _, shown := range []string{"delete", "filter", "refresh", "palette", "help", "quit"} {
+		if !strings.Contains(last, shown) {
+			t.Errorf("bottom bar should show %q when table has rows:\n%s", shown, last)
+		}
+	}
+}
+
+// TestNeedsExistingRowFlagHidesFromBarWhenEmpty pins the explicit
+// registry.Operation.NeedsExistingRow opt-in: ops that require an
+// existing row (but pick up their PK from Prefill / config instead
+// of Suggest) must still be hidden from the bottom bar when the
+// table is empty, and must still be listed in the "?" help overlay.
+//
+// Regression guard for the add-target case where "<t>" was leaking
+// onto the status bar with an empty apps list because the op's
+// name field uses Prefill, not Suggest, and the auto-detection
+// heuristic missed it.
+func TestNeedsExistingRowFlagHidesFromBarWhenEmpty(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{
+		Name: "app", Plural: "apps", Store: fakeStore{},
+		Fields: []registry.Field{
+			{Name: "Name", Flag: "name", Table: registry.TableHint{Header: "NAME"}},
+		},
+		Operations: map[string]registry.Operation{
+			"add-target": {
+				Name: "add-target", Key: "t",
+				NeedsExistingRow: true,
+				// name has Prefill but NO Suggest — this is the
+				// combination the old heuristic missed.
+				Fields: []registry.Field{
+					{Flag: "name", Required: true, Prefill: func() string { return "" }},
+				},
+				Steps: []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
+			},
+		},
+	})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	// Empty table.
+	a.items = nil
+	a.filterText = ""
+
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 160, Height: 30})
+
+	plain := stripANSI(m.(*app).View().Content)
+	lines := strings.Split(plain, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	last := lines[len(lines)-1]
+	if strings.Contains(last, "add-target") {
+		t.Errorf("bottom bar should hide add-target when table is empty:\n%s", last)
+	}
+
+	// Still discoverable via "?" help.
+	m, _ = m.Update(tea.KeyPressMsg{Code: '?', Text: "?"})
+	withHelp := stripANSI(m.(*app).View().Content)
+	if !strings.Contains(withHelp, "add-target") {
+		t.Errorf("help overlay missing add-target:\n%s", withHelp)
+	}
+}
+
+// TestNeedsExistingRowFlagShowsOnPopulatedTable confirms the flag
+// only gates the bar on emptiness — once there's a row, the hint
+// must come back.
+func TestNeedsExistingRowFlagShowsOnPopulatedTable(t *testing.T) {
+	type row struct{ Name string }
+	reg := registry.New()
+	reg.Register(registry.Resource{
+		Name: "app", Plural: "apps", Store: fakeStore{},
+		Fields: []registry.Field{
+			{Name: "Name", Flag: "name", Table: registry.TableHint{Header: "NAME"}},
+		},
+		Operations: map[string]registry.Operation{
+			"add-target": {
+				Name: "add-target", Key: "t",
+				NeedsExistingRow: true,
+				Fields: []registry.Field{
+					{Flag: "name", Required: true, Prefill: func() string { return "" }},
+				},
+				Steps: []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
+			},
+		},
+	})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	a.items = []any{row{Name: "my-app"}}
+	a.cursor = 0
+
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 160, Height: 30})
+
+	plain := stripANSI(m.(*app).View().Content)
+	lines := strings.Split(plain, "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "add-target") {
+		t.Errorf("bottom bar should show add-target when a row is present:\n%s", last)
+	}
+}
+
 // TestHideFromStatusBar_RemovesFromBarButKeepsInHelp is a regression
 // guard: an operation that opted into HideFromStatusBar must NOT
 // appear in the bottom status-bar hint row, but MUST still appear in
@@ -165,12 +374,97 @@ func TestNumberKeySwitchesResource(t *testing.T) {
 	reg.Register(registry.Resource{Name: "alpha", Plural: "alphas", Store: fakeStore{}})
 	reg.Register(registry.Resource{Name: "beta", Plural: "betas", Store: fakeStore{}})
 	a := newApp(context.Background(), reg, Options{Name: "test"})
-	a.resource = ptr(reg.All()[0]) // alpha
+	a.resource = ptr(reg.All()[1]) // beta
 	var m tea.Model = a
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	// "1" selects the first registered resource (alpha). Previously
+	// "1" selected index 1 (beta); we want 1-based keys so the
+	// number row lines up with how users read the breadcrumb pills
+	// left-to-right.
 	m, _ = m.Update(tea.KeyPressMsg{Code: '1', Text: "1"})
+	if got := m.(*app).resource.Name; got != "alpha" {
+		t.Errorf("after '1', resource = %q, want alpha", got)
+	}
+	// "2" advances to the second registered resource.
+	m, _ = m.Update(tea.KeyPressMsg{Code: '2', Text: "2"})
 	if got := m.(*app).resource.Name; got != "beta" {
-		t.Errorf("after '1', resource = %q, want beta", got)
+		t.Errorf("after '2', resource = %q, want beta", got)
+	}
+}
+
+// TestZeroKeySelectsTenthResource pins the one non-obvious piece of
+// the 1-based mapping: "0" sits on the far right of the number row
+// and conventionally means "10" when numeric keys are used as
+// sequential selectors (browser tabs, IDEs, tmux window switching).
+func TestZeroKeySelectsTenthResource(t *testing.T) {
+	reg := registry.New()
+	// Registry.All() returns resources sorted by name; use
+	// zero-padded names so alphabetical order matches the intended
+	// tab order (a01 … a10) and "a10" genuinely sits at index 9.
+	names := []string{"a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10"}
+	for _, n := range names {
+		reg.Register(registry.Resource{Name: n, Plural: n + "s", Store: fakeStore{}})
+	}
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m, _ = m.Update(tea.KeyPressMsg{Code: '0', Text: "0"})
+	if got := m.(*app).resource.Name; got != "a10" {
+		t.Errorf("after '0' with 10 resources, resource = %q, want a10", got)
+	}
+}
+
+// TestNumberKeyOutOfRangeIsNoop confirms that pressing a digit beyond
+// the registered count leaves the current resource untouched — the
+// key falls through to dispatch which is harmless for bare digits.
+func TestNumberKeyOutOfRangeIsNoop(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{Name: "alpha", Plural: "alphas", Store: fakeStore{}})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	// Only one resource registered; "2".."9" and "0" must be no-ops.
+	for _, k := range []rune{'2', '3', '9', '0'} {
+		m, _ = m.Update(tea.KeyPressMsg{Code: k, Text: string(k)})
+		if got := m.(*app).resource.Name; got != "alpha" {
+			t.Errorf("after %q with 1 resource, resource = %q, want alpha (unchanged)", string(k), got)
+		}
+	}
+}
+
+// TestResourceHintsMatchDigitKeys pins the top-of-screen tab labels to
+// the same 1-based numeric mapping used by the digit dispatcher: the
+// first resource is labeled "<1>", the ninth "<9>", and the tenth
+// wraps to "<0>". Regression guard for the previous 0-based labels
+// getting out of sync with the key handler.
+func TestResourceHintsMatchDigitKeys(t *testing.T) {
+	reg := registry.New()
+	names := []string{"a01", "a02", "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10"}
+	for _, n := range names {
+		reg.Register(registry.Resource{Name: n, Plural: n + "s", Store: fakeStore{}})
+	}
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	var m tea.Model = a
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 200, Height: 30})
+	plain := stripANSI(m.(*app).View().Content)
+
+	// The hint row lives in the top header block and should pair each
+	// digit with the corresponding plural, in registration order.
+	expected := []string{
+		"<1> a01s", "<2> a02s", "<3> a03s", "<4> a04s", "<5> a05s",
+		"<6> a06s", "<7> a07s", "<8> a08s", "<9> a09s", "<0> a10s",
+	}
+	for _, want := range expected {
+		if !strings.Contains(plain, want) {
+			t.Errorf("resource hints missing %q:\n%s", want, plain)
+		}
+	}
+	// And the old 0-based label for the first tab must be gone.
+	if strings.Contains(plain, "<0> a01s") {
+		t.Errorf("resource hints still advertise '<0> a01s' — the first tab should be '<1>'")
 	}
 }
 
@@ -272,7 +566,6 @@ func TestContextDisplayedInFooter(t *testing.T) {
 		t.Errorf("context label not in view:\n%s", plain)
 	}
 }
-
 
 // getCountingStore records how many times Get has been called so tests
 // can assert that detail refetches are actually issued.
@@ -519,10 +812,10 @@ func TestMergeByPrimaryKey(t *testing.T) {
 func TestRenderAsyncCell(t *testing.T) {
 	reg := registry.New()
 	reg.Register(registry.Resource{
-		Name:    "thing",
-		Plural:  "things",
-		Fields:  []registry.Field{{Name: "Name"}},
-		Store:   fakeStore{},
+		Name:   "thing",
+		Plural: "things",
+		Fields: []registry.Field{{Name: "Name"}},
+		Store:  fakeStore{},
 	})
 	a := newApp(context.Background(), reg, Options{Name: "test"})
 	a.resource = ptr(reg.All()[0])

@@ -202,9 +202,25 @@ func (m *liveModel) View() tea.View {
 	}
 
 	// Per-step lines. Skipped steps are suppressed entirely.
+	// When events carry Category values we insert a muted "── Name ──"
+	// divider whenever the category transitions, and indent subsequent
+	// step rows by two spaces so they visually group under the divider.
+	// Ungrouped steps (Category == "") render flush-left as before, so
+	// single-step sagas are byte-identical to today.
+	lastCat := ""
 	for _, e := range m.steps {
 		if e.Status == runtime.Skipped {
 			continue
+		}
+		if e.Category != lastCat {
+			if e.Category != "" {
+				b.WriteString(theme.MutedText.Render("── "+e.Category+" ──") + "\n")
+			}
+			lastCat = e.Category
+		}
+		indent := ""
+		if e.Category != "" {
+			indent = "  "
 		}
 		mark := theme.PendMark
 		switch e.Status {
@@ -219,13 +235,13 @@ func (m *liveModel) View() tea.View {
 		if e.Status == runtime.Failed && e.Err != nil {
 			label += " — " + theme.Err.Render(e.Err.Error())
 		}
-		b.WriteString(mark + " " + label + "\n")
+		b.WriteString(indent + mark + " " + label + "\n")
 		// Per-step Output: indented detail lines shown under the
 		// step label. Used by steps that want to surface a result
 		// (e.g. created role ARN, bucket names, endpoints).
 		if e.Status == runtime.OK && e.Output != "" {
 			for _, ln := range strings.Split(strings.TrimRight(e.Output, "\n"), "\n") {
-				b.WriteString("    " + theme.MutedText.Render(ln) + "\n")
+				b.WriteString(indent + "    " + theme.MutedText.Render(ln) + "\n")
 			}
 		}
 	}

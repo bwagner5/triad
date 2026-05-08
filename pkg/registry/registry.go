@@ -386,11 +386,19 @@ type State struct {
 }
 
 // Step is one unit of work in a Saga.
+//
+// Category is an optional grouping label. Consecutive steps with the
+// same non-empty Category form a visual group in progress UIs; an empty
+// Category means "ungrouped" — the step renders at the top level. When
+// the Category string changes between adjacent steps the previous group
+// closes and a new one begins, so declaration order drives render order
+// and there's no parallel "groups" structure to keep in sync.
 type Step struct {
-	Label string
-	Do    func(ctx context.Context, s *State) error
-	Undo  func(ctx context.Context, s *State) error // optional, run on failure
-	Skip  func(s *State) bool                       // optional
+	Label    string
+	Category string
+	Do       func(ctx context.Context, s *State) error
+	Undo     func(ctx context.Context, s *State) error // optional, run on failure
+	Skip     func(s *State) bool                       // optional
 }
 
 // DetailView is an optional structured representation of one resource item.
@@ -466,6 +474,22 @@ type Operation struct {
 	// status bar (e.g. a resource "create" key when most interactions
 	// happen on existing rows).
 	HideFromStatusBar bool
+	// NeedsExistingRow, when true, declares that this operation
+	// requires an existing row of the resource to be meaningful
+	// (e.g. add-target, restart, exec — anything that validates
+	// "does row X exist?" in its first step). The TUI uses it to:
+	//
+	//   - hide the key hint from the bottom status bar when the
+	//     table is empty (nothing to operate on);
+	//   - pre-fill the wizard from the currently-selected row at
+	//     launch, even if the op's PK field uses Prefill instead
+	//     of Suggest.
+	//
+	// Ops whose PK field already has Suggest are auto-detected as
+	// needing a row — this flag is the explicit opt-in for ops that
+	// pick up the primary key from config / defaults (Prefill) but
+	// still genuinely require an existing row.
+	NeedsExistingRow bool
 }
 
 // Resource is the central declaration that drives all three UIs.

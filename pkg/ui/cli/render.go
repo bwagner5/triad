@@ -114,8 +114,16 @@ func equalFold(a, b string) bool {
 // RenderEvents prints saga events to w with spinners/checkmarks.
 // It reads until the channel is closed. In non-interactive mode, a
 // NeedsInput event aborts the saga (the consumer has no way to prompt).
+//
+// When events carry non-empty Category values, RenderEvents inserts a
+// muted `── <Category> ──` divider whenever the category changes, and
+// indents subsequent step lines by two spaces so they visually group
+// under the divider. Ungrouped events (Category == "") render flush
+// left as before — existing log-scraping regexes that match on step
+// labels keep working.
 func RenderEvents(w io.Writer, ch <-chan runtime.Event) error {
 	var finalErr error
+	var lastCat string
 	for e := range ch {
 		if e.Status == runtime.NeedsInput {
 			// No UI to prompt in CI mode — abort the saga by passing nil.
@@ -139,13 +147,27 @@ func RenderEvents(w io.Writer, ch <-chan runtime.Event) error {
 			}
 			continue
 		}
+		// Emit a category divider when the category transitions. Empty
+		// categories (ungrouped steps) don't get a divider — they just
+		// render flush-left. We still reset lastCat so a later
+		// transition from "" → "Foo" prints the "Foo" divider.
+		if e.Category != lastCat {
+			if e.Category != "" {
+				_, _ = fmt.Fprintln(w, theme.MutedText.Render("── "+e.Category+" ──"))
+			}
+			lastCat = e.Category
+		}
+		indent := ""
+		if e.Category != "" {
+			indent = "  "
+		}
 		switch e.Status {
 		case runtime.Running:
-			_, _ = fmt.Fprintf(w, "%s %s\n", theme.RunMark, e.Step)
+			_, _ = fmt.Fprintf(w, "%s%s %s\n", indent, theme.RunMark, e.Step)
 		case runtime.OK:
-			_, _ = fmt.Fprintf(w, "%s %s\n", theme.OKMark, e.Step)
+			_, _ = fmt.Fprintf(w, "%s%s %s\n", indent, theme.OKMark, e.Step)
 		case runtime.Failed:
-			_, _ = fmt.Fprintf(w, "%s %s — %s\n", theme.ErrMark, e.Step, errStr(e.Err))
+			_, _ = fmt.Fprintf(w, "%s%s %s — %s\n", indent, theme.ErrMark, e.Step, errStr(e.Err))
 		case runtime.Skipped:
 			// don't show skipped steps
 		}

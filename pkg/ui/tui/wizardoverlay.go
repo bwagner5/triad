@@ -841,7 +841,6 @@ func (wo *wizardOverlay) Box(w, h int) string {
 				case 0:
 					val = theme.MutedText.Render("(none selected)")
 				case 1:
-					val = val // single pick: show the value verbatim
 				default:
 					val = fmt.Sprintf("%d selected", n)
 				}

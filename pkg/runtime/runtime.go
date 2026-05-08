@@ -59,6 +59,11 @@ type Event struct {
 	// Output is an optional summary shown after saga completion.
 	// Populated by the last step to surface results (e.g. URLs).
 	Output string
+	// Category is copied verbatim from the emitting Step.Category so
+	// renderers can group consecutive events by category without having
+	// to look up the original Operation. Empty for ungrouped steps and
+	// for the final Done event.
+	Category string
 
 	// ---- NeedsInput payload ----
 	// Needs is populated when Status == NeedsInput. The consumer renders a
@@ -124,7 +129,7 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 			if step.Skip != nil && step.Skip(st) {
 				stepLog.InfoContext(stepCtx, "step skipped")
 				skippedCount++
-				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Skipped, At: time.Now()}
+				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Category: step.Category, Index: i, Total: total, Status: Skipped, At: time.Now()}
 				continue
 			}
 			st.Output = ""
@@ -135,7 +140,7 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 			// same step. Runs at most 8 times per step to prevent loops.
 			var stepErr error
 			for attempt := 0; attempt < 8; attempt++ {
-				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Running, At: time.Now()}
+				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Category: step.Category, Index: i, Total: total, Status: Running, At: time.Now()}
 				stepErr = step.Do(stepCtx, st)
 				var need *registry.NeedInput
 				if !errors.As(stepErr, &need) {
@@ -153,7 +158,7 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 					slog.Any("err", stepErr),
 					slog.Duration("elapsed", time.Since(stepStart)))
 				failedCount++
-				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: Failed, Err: stepErr, At: time.Now()}
+				ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Category: step.Category, Index: i, Total: total, Status: Failed, Err: stepErr, At: time.Now()}
 				runErr = stepErr
 				for j := i - 1; j >= 0; j-- {
 					if op.Steps[j].Undo != nil {
@@ -169,7 +174,7 @@ func Run(ctx context.Context, bus *Bus, res registry.Resource, op registry.Opera
 			stepLog.InfoContext(stepCtx, "step ok",
 				slog.Duration("elapsed", time.Since(stepStart)))
 			okCount++
-			ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Index: i, Total: total, Status: OK, Output: stepOutput, At: time.Now()}
+			ch <- Event{Saga: op.Name, Resource: res.Name, Step: step.Label, Category: step.Category, Index: i, Total: total, Status: OK, Output: stepOutput, At: time.Now()}
 		}
 		final := Event{Saga: op.Name, Resource: res.Name, Index: -1, Total: total, Status: OK, At: time.Now(), Done: true, Output: finalOutput}
 		if runErr != nil {
@@ -216,7 +221,7 @@ func solicitInput(
 		snapshot[k] = v
 	}
 	ch <- Event{
-		Saga: op.Name, Resource: res.Name, Step: step.Label,
+		Saga: op.Name, Resource: res.Name, Step: step.Label, Category: step.Category,
 		Index: i, Total: total, Status: NeedsInput, At: time.Now(),
 		Needs: need, Provide: provide, State: snapshot,
 	}

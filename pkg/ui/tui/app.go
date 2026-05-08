@@ -620,13 +620,11 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	}
 
-	// Saga overlay: esc always dismisses; enter dismisses when in terminal state.
+	// Saga overlay: j/k/enter navigate categories; esc dismisses;
+	// enter dismisses when the saga finished and isn't sitting on a
+	// category header (a toggleable cursor consumes enter first).
 	if a.saga.Active() {
-		if key == "esc" || (a.saga.done && key == "enter") {
-			a.saga.Clear()
-			return a, nil
-		}
-		return a, nil // consume all keys while saga is active
+		return a.handleSagaOverlayKey(key)
 	}
 
 	if a.showPalette {
@@ -659,9 +657,18 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		key = "j"
 	}
 
-	// Numeric resource switching: 0..9 jumps to that registered resource.
+	// Numeric resource switching: "1".."9" jumps to the 1st..9th
+	// registered resource; "0" jumps to the 10th. Using 1-based keys
+	// keeps the mapping in the same order the user reads the
+	// breadcrumb pills (leftmost pill is "1") and avoids the awkward
+	// layout where "0" sits on the far right of the number row but
+	// would select the leftmost tab.
 	if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
 		idx := int(key[0] - '0')
+		if idx == 0 {
+			idx = 10
+		}
+		idx-- // convert to 0-based slice index
 		all := a.reg.All()
 		if idx < len(all) {
 			a.resource = &all[idx]
@@ -788,6 +795,22 @@ func (a *app) handlePaletteChoice(msg paletteResultMsg) (tea.Model, tea.Cmd) {
 		return a, a.launchOp(nil, e.op, nil)
 	}
 	return a, nil
+}
+
+// handleSagaOverlayKey routes a keystroke while the saga overlay is
+// active. The overlay's HandleKey first claims navigation keys (j/k,
+// enter/space on a category header, arrows, e/c); only if it returns
+// false do we fall through to the dismiss path (esc always dismisses;
+// enter dismisses a completed flat saga or a completed row-cursor).
+func (a *app) handleSagaOverlayKey(key string) (tea.Model, tea.Cmd) {
+	if a.saga.HandleKey(key) {
+		return a, nil
+	}
+	if key == "esc" || (a.saga.done && key == "enter") {
+		a.saga.Clear()
+		return a, nil
+	}
+	return a, nil // consume all keys while saga is active
 }
 
 func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
@@ -1070,6 +1093,10 @@ func (a *app) renderHeader(w int) string {
 }
 
 // renderResourceHints lays out resource hotkeys horizontally across one row.
+// The digit shown in each hint MUST mirror the numeric-switch mapping in
+// handleKey: resources 1..9 get "<1>".."<9>", the 10th gets "<0>". Keeping
+// the two in lockstep is why the digit is computed here rather than just
+// using the slice index.
 func (a *app) renderResourceHints(w int) string {
 	all := a.reg.All()
 	if len(all) == 0 {
@@ -1080,7 +1107,11 @@ func (a *app) renderResourceHints(w int) string {
 		if i >= 10 {
 			break
 		}
-		key := theme.Key.Render(fmt.Sprintf("<%d>", i))
+		digit := i + 1
+		if digit == 10 {
+			digit = 0
+		}
+		key := theme.Key.Render(fmt.Sprintf("<%d>", digit))
 		name := r.Plural
 		style := theme.MutedText
 		if a.resource != nil && r.Name == a.resource.Name {

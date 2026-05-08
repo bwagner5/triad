@@ -9,13 +9,21 @@ import (
 )
 
 // needsSelection returns true when an operation acts on an existing resource
-// (i.e. at least one field uses Suggest to pick from existing items).
+// row — either via the explicit Operation.NeedsExistingRow flag, or via the
+// auto-detection rule: a field whose flag matches the resource's primary
+// key has a Suggest function.
 func needsSelection(res registry.Resource, op registry.Operation) bool {
-	// An operation "needs selection" when it acts on an existing resource
-	// — i.e., it has a Suggest field whose flag matches the resource's
-	// primary key (first table field). Operations like "create" have
-	// Suggest fields for picking blueprints/bundles but don't select an
-	// existing resource, so they should NOT pre-populate from the table.
+	// Explicit opt-in wins: ops that pick up the PK from Prefill /
+	// config (not Suggest) still want row-dependent behavior.
+	if op.NeedsExistingRow {
+		return true
+	}
+	// Auto-detection: an operation "needs selection" when it acts on
+	// an existing resource — i.e., it has a Suggest field whose flag
+	// matches the resource's primary key (first table field).
+	// Operations like "create" have Suggest fields for picking
+	// blueprints/bundles but don't select an existing resource, so
+	// they should NOT pre-populate from the table.
 	pk := ""
 	for _, f := range res.Fields {
 		if f.Table.Header != "" {
@@ -83,6 +91,15 @@ func (a *app) keyMap() []binding {
 		}},
 	)
 
+	// hasSelection is true when the cursor points at a real row.
+	// Drives the contextual hiding below: when the table is empty we
+	// strip row-dependent hints from the bottom bar so the user sees
+	// only the actions that are actually meaningful (refresh, global
+	// ops, palette, help, quit). Bindings stay registered — they remain
+	// in the "?" help overlay, in the command palette, and continue to
+	// dispatch if pressed — only the status-bar hint is suppressed.
+	hasSelection := len(a.items) > 0 && a.cursor < len(a.items)
+
 	// ---- Resource (contextual: from current resource's operations) ----
 	if a.resource != nil {
 		opNames := make([]string, 0, len(a.resource.Operations))
@@ -96,14 +113,22 @@ func (a *app) keyMap() []binding {
 				continue
 			}
 			// Skip operations disabled for the currently selected item.
-			if op.Enabled != nil && len(a.items) > 0 && a.cursor < len(a.items) {
+			if op.Enabled != nil && hasSelection {
 				if !op.Enabled(a.items[a.cursor]) {
 					continue
 				}
 			}
+			// When the table is empty, hide row-dependent ops
+			// (delete, logs, describe, etc.) from the bottom bar.
+			// They stay in the "?" help overlay / palette so users
+			// can still reach them if they know the key.
+			hideFromBar := op.HideFromStatusBar
+			if !hasSelection && needsSelection(*a.resource, op) {
+				hideFromBar = true
+			}
 			bs = append(bs, binding{
 				Key: op.Key, Label: op.Name, Cat: "Resource",
-				HideFromStatusBar: op.HideFromStatusBar,
+				HideFromStatusBar: hideFromBar,
 				Run: func(a *app) (tea.Model, tea.Cmd) {
 					var input registry.Input
 					if needsSelection(*a.resource, op) {
@@ -135,11 +160,18 @@ func (a *app) keyMap() []binding {
 		})
 	}
 	bs = append(bs,
-		binding{Key: "/", Label: "filter", Cat: "Global", Run: func(a *app) (tea.Model, tea.Cmd) {
-			a.filtering = true
-			a.filterTI.SetValue(a.filterText)
-			return a, a.filterTI.Focus()
-		}},
+		binding{
+			Key: "/", Label: "filter", Cat: "Global",
+			// Suppress the filter hint when there's nothing to
+			// filter (empty table, no active filter). The key still
+			// works and remains listed in the "?" help overlay.
+			HideFromStatusBar: len(a.items) == 0 && a.filterText == "",
+			Run: func(a *app) (tea.Model, tea.Cmd) {
+				a.filtering = true
+				a.filterTI.SetValue(a.filterText)
+				return a, a.filterTI.Focus()
+			},
+		},
 		binding{Key: ":", Label: "palette", Cat: "Global", Run: func(a *app) (tea.Model, tea.Cmd) {
 			a.showPalette = true
 			a.palette.Focus()

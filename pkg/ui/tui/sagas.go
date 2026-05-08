@@ -109,7 +109,7 @@ func (a *app) startSaga(msg startSagaMsg) tea.Cmd {
 	trace.Trace(a.ctx, "tui start saga", "op", msg.op.Name, "resource", res.Name, "steps", len(msg.op.Steps))
 	ch := runtime.Run(a.ctx, a.bus, res, *msg.op, msg.input)
 	a.sagaCh = ch
-	a.saga.Start(msg.op.Name)
+	a.saga.Start(msg.op.Name, msg.op.Steps)
 	// Saga owns the screen now — the wizard's busy spinner is obsolete.
 	a.wizard.Clear()
 	return readSagaCmd(ch)

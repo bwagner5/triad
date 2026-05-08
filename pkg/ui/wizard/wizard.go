@@ -67,7 +67,7 @@ type model struct {
 	committed         []string     // rendered lines for previously-answered fields
 	committedSections []string     // section name for each committed line (parallel)
 	committedIdx      []int        // field index for each committed line (for goBack)
-	termH             int      // terminal height for scroll capping
+	termH             int          // terminal height for scroll capping
 
 	err      error
 	canceled bool
@@ -519,7 +519,7 @@ func (m *model) View() tea.View {
 	return tea.NewView(s)
 }
 
-// renderSectionHeader returns a colourful, lightly-decorated header
+// renderSectionHeader returns a colorful, lightly-decorated header
 // line for a wizard section. Format: "━━ Title ━━────────" with the
 // accent color on the title and muted rule characters around it.
 // Blank line above for breathing room.

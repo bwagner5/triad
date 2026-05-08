@@ -10,7 +10,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -253,11 +252,16 @@ func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
 				return err
 			}
-			if g.Interactive() {
-				return runWithSpinner(cmd.Context(), op.Short, func(ctx context.Context) error {
-					return op.Run(ctx, in)
-				})
-			}
+			// Run ops drive their own I/O (interactive subprocesses
+			// like ssh / logs, API-backed commands that Fprintln to
+			// stdout, etc.). The CLI deliberately does not wrap this
+			// in a spinner: wrapping swapped os.Stdout for a pipe,
+			// which broke any op whose subprocess needed the real
+			// TTY (most notably `instance ssh`, which would hang
+			// with a non-TTY stdout and swallow Ctrl+C because ssh
+			// had already put the terminal in raw mode). Run ops
+			// that want progress feedback for slow API calls should
+			// print it themselves; they own the output stream.
 			return op.Run(cmd.Context(), in)
 		},
 	}
@@ -463,54 +467,7 @@ func streamOp(ctx context.Context, w io.Writer, res registry.Resource, op regist
 	return RenderEvents(w, ch)
 }
 
-// runWithSpinner shows an inline spinner while fn executes. Used for
-// simple Run actions (status, logs) in interactive CLI mode.
-func runWithSpinner(ctx context.Context, label string, fn func(context.Context) error) error {
-	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-
-	// Capture stdout so fn's output doesn't collide with the spinner.
-	origStdout := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		return fn(ctx) // fallback: no spinner
-	}
-	os.Stdout = w
-
-	var buf bytes.Buffer
-	copyDone := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(&buf, r)
-		close(copyDone)
-	}()
-
-	// Spinner on stderr.
-	stop := make(chan struct{})
-	stopped := make(chan struct{})
-	go func() {
-		defer close(stopped)
-		i := 0
-		for {
-			select {
-			case <-stop:
-				fmt.Fprintf(os.Stderr, "\r\033[K")
-				return
-			default:
-				fmt.Fprintf(os.Stderr, "\r%s %s", frames[i%len(frames)], label+"…")
-				i++
-				time.Sleep(80 * time.Millisecond)
-			}
-		}
-	}()
-
-	fnErr := fn(ctx)
-
-	// Stop spinner, restore stdout, flush captured output.
-	close(stop)
-	<-stopped
-	w.Close()
-	os.Stdout = origStdout
-	<-copyDone
-	_, _ = origStdout.Write(buf.Bytes())
-
-	return fnErr
-}
+// runWithSpinner used to wrap interactive CLI Run ops with a stdout-
+// capturing spinner. It's gone: swapping os.Stdout for a pipe broke
+// any Run op whose subprocess wanted the real terminal (ssh, logs,
+// exec). Ops that need progress feedback print it themselves.
