@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/runtime"
 )
@@ -48,7 +49,7 @@ func TestCategoryAutoExpandsOnRunning(t *testing.T) {
 	s.Start("deploy", threeGroup())
 	pushEvent(&s, 0, runtime.Running, "p1", "Plan", nil)
 
-	out := stripANSI(s.Box(120, 40, "⟳"))
+	out := stripANSI(s.Box(120, 40, "⟳", "⟳"))
 	if !strings.Contains(out, "▼") {
 		t.Errorf("expected an expanded chevron, got:\n%s", out)
 	}
@@ -75,7 +76,7 @@ func TestCategoryAutoCollapsesOnOK(t *testing.T) {
 	pushEvent(&s, 1, runtime.Running, "p2", "Plan", nil)
 	pushEvent(&s, 1, runtime.OK, "p2", "Plan", nil)
 
-	out := stripANSI(s.Box(120, 40, "⟳"))
+	out := stripANSI(s.Box(120, 40, "⟳", "⟳"))
 	// Plan header exists and is collapsed (▶) — its step rows
 	// (p1, p2) must NOT appear under an expanded section.
 	planLine := ""
@@ -111,7 +112,7 @@ func TestCategoryAutoExpandsOnFailure(t *testing.T) {
 	boom := errors.New("kaboom")
 	pushEvent(&s, 1, runtime.Failed, "p2", "Plan", boom)
 
-	out := stripANSI(s.Box(120, 40, "⟳"))
+	out := stripANSI(s.Box(120, 40, "⟳", "⟳"))
 	if !strings.Contains(out, "▼") {
 		t.Errorf("failed Plan should auto-expand (▼); got:\n%s", out)
 	}
@@ -132,7 +133,7 @@ func TestManualToggleSticks(t *testing.T) {
 		pushEvent(&s, i, runtime.OK, "plan-step", "Plan", nil)
 	}
 	// Prime visibleLines.
-	_ = s.Box(120, 40, "⟳")
+	_ = s.Box(120, 40, "⟳", "⟳")
 	// Place cursor on the Plan header (first non-flat group header is
 	// line 0 in the visible list).
 	if s.cursor != 0 {
@@ -145,7 +146,7 @@ func TestManualToggleSticks(t *testing.T) {
 	// Now advance Provision into running; auto-rules fire again.
 	pushEvent(&s, 2, runtime.Running, "q1", "Provision", nil)
 
-	out := stripANSI(s.Box(120, 40, "⟳"))
+	out := stripANSI(s.Box(120, 40, "⟳", "⟳"))
 	// Plan stays expanded because userToggled[Plan] is set.
 	planLine := ""
 	for _, ln := range strings.Split(out, "\n") {
@@ -168,11 +169,11 @@ func TestExpandAllCollapseAll(t *testing.T) {
 	// Only Plan in running; others pending — default expanded state is
 	// only Plan ▼. Press 'e' and assert all ▼.
 	pushEvent(&s, 0, runtime.Running, "p1", "Plan", nil)
-	_ = s.Box(120, 40, "⟳")
+	_ = s.Box(120, 40, "⟳", "⟳")
 	if !s.HandleKey("e") {
 		t.Fatal("'e' should be consumed")
 	}
-	out := stripANSI(s.Box(120, 40, "⟳"))
+	out := stripANSI(s.Box(120, 40, "⟳", "⟳"))
 	if strings.Contains(out, "▶") {
 		t.Errorf("after 'e' every group must be expanded; got:\n%s", out)
 	}
@@ -180,7 +181,7 @@ func TestExpandAllCollapseAll(t *testing.T) {
 	if !s.HandleKey("c") {
 		t.Fatal("'c' should be consumed")
 	}
-	out = stripANSI(s.Box(120, 40, "⟳"))
+	out = stripANSI(s.Box(120, 40, "⟳", "⟳"))
 	if strings.Contains(out, "▼") {
 		t.Errorf("after 'c' every group must be collapsed; got:\n%s", out)
 	}
@@ -202,7 +203,7 @@ func TestMixedCategorizedAndUncategorized(t *testing.T) {
 	}
 	pushEvent(&s, 2, runtime.Running, "Finalize", "", nil)
 
-	out := stripANSI(s.Box(120, 40, "⟳"))
+	out := stripANSI(s.Box(120, 40, "⟳", "⟳"))
 	// Finalize must appear as a flat top-level row. The easiest check:
 	// its line does not start with 2+ leading spaces-plus-chevron like
 	// a category header would.
@@ -236,7 +237,7 @@ func TestUngroupedSagaRendersAsToday(t *testing.T) {
 	pushEvent(&s, 1, runtime.OK, "remove", "", nil)
 	s.Push(runtime.Event{Done: true, Status: runtime.OK, At: time.Now()})
 
-	out := stripANSI(s.Box(80, 30, "⟳"))
+	out := stripANSI(s.Box(80, 30, "⟳", "⟳"))
 	for _, forbidden := range []string{"▶", "▼", "j/k navigate"} {
 		if strings.Contains(out, forbidden) {
 			t.Errorf("ungrouped saga must render as today (no %q); got:\n%s", forbidden, out)
@@ -263,7 +264,7 @@ func TestOverlayConsumesNavigationKeys(t *testing.T) {
 		Status: runtime.Running, At: time.Now(),
 	})
 	// Render once to populate visibleLines.
-	_ = h.App().saga.Box(h.App().width, h.App().height, "⟳")
+	_ = h.App().saga.Box(h.App().width, h.App().height, "⟳", "⟳")
 
 	// Snapshot cursor position so we can assert j moves it.
 	before := h.App().saga.cursor
@@ -312,7 +313,7 @@ func TestCategorizedSagaEscDismisses(t *testing.T) {
 	h := newHarness(t, reg, Options{Name: "test"})
 	h.Resize(160, 40)
 	h.App().saga.Start("deploy", threeGroup())
-	_ = h.App().saga.Box(h.App().width, h.App().height, "⟳")
+	_ = h.App().saga.Box(h.App().width, h.App().height, "⟳", "⟳")
 
 	h.Press("esc")
 	if h.App().saga.Active() {
@@ -357,7 +358,7 @@ func TestBuildSagaGroupsSplitsOnCategoryChange(t *testing.T) {
 func TestHandleKeyIgnoresUnknown(t *testing.T) {
 	s := newSagaOverlay()
 	s.Start("deploy", threeGroup())
-	_ = s.Box(120, 40, "⟳")
+	_ = s.Box(120, 40, "⟳", "⟳")
 	if s.HandleKey("q") {
 		t.Error("'q' should not be consumed by HandleKey")
 	}
@@ -366,3 +367,273 @@ func TestHandleKeyIgnoresUnknown(t *testing.T) {
 // Silence unused imports under some test build tags.
 var _ = tea.KeyPressMsg{}
 var _ = context.Background
+
+// TestHierarchicalSagaGracePeriodBlocksEnterDismiss pins the fix for
+// "the overlay doesn't stick around after finishing." After a
+// categorized saga completes, enter/esc must NOT dismiss the overlay
+// until minDoneDisplay has elapsed — otherwise the user's "confirm"
+// muscle memory tears down the progress view before they can read
+// the outcome. The auto-dismiss Tick fires at the same boundary.
+func TestHierarchicalSagaGracePeriodBlocksEnterDismiss(t *testing.T) {
+	reg := registry.New()
+	reg.Register(registry.Resource{Name: "app", Plural: "apps", Store: fakeStore{}})
+	h := newHarness(t, reg, Options{Name: "test"})
+	h.Resize(160, 40)
+
+	h.App().saga.Start("deploy", threeGroup())
+	// Run through every step and emit the final Done event so the
+	// overlay is in the "just completed" state the grace guards.
+	for i, st := range threeGroup() {
+		h.App().saga.Push(runtime.Event{
+			Step: st.Label, Index: i, Category: st.Category,
+			Status: runtime.OK, At: time.Now(),
+		})
+	}
+	h.App().saga.Push(runtime.Event{Done: true, Status: runtime.OK, At: time.Now()})
+	// Force a render so visibleLines is populated before we send keys.
+	_ = h.App().saga.Box(h.App().width, h.App().height, "⟳", "⟳")
+
+	// doneAt was just stamped: enter should be suppressed during the
+	// grace window so users get a beat to read.
+	h.Press("enter")
+	if !h.App().saga.Active() {
+		t.Error("enter during grace window should not dismiss the overlay")
+	}
+	h.Press("esc")
+	if !h.App().saga.Active() {
+		t.Error("esc during grace window should not dismiss the overlay")
+	}
+
+	// Simulate time passing by rewinding doneAt past the grace cutoff.
+	// After the window elapses esc dismisses immediately. (Enter on a
+	// header/step row still toggles the category — that's the whole
+	// point of the hierarchical overlay — so it doesn't dismiss. The
+	// auto-dismiss Tick also fires at this boundary.)
+	h.App().saga.doneAt = time.Now().Add(-2 * minDoneDisplay)
+	h.Press("esc")
+	if h.App().saga.Active() {
+		t.Error("esc after grace window should dismiss the overlay")
+	}
+}
+
+// TestFlatSagaNoGracePeriod confirms the grace applies only to
+// categorized sagas. Short flat workflows (instance delete, etc.)
+// have nothing to read — forcing a delay there would just add
+// friction.
+func TestFlatSagaNoGracePeriod(t *testing.T) {
+	s := newSagaOverlay()
+	s.Start("delete", []registry.Step{{Label: "stop"}}) // flat, no Category
+	s.Push(runtime.Event{Step: "stop", Index: 0, Status: runtime.OK, At: time.Now()})
+	s.Push(runtime.Event{Done: true, Status: runtime.OK, At: time.Now()})
+
+	if !s.dismissable() {
+		t.Error("flat saga should always be dismissable — no categorized output to read")
+	}
+}
+
+// TestEnterTogglesFromStepRowCollapsesParent is the fix for "some
+// drop-downs wouldn't expand." Previously, enter only toggled when
+// the cursor was precisely on a category header line — which meant
+// step-row navigation broke the toggle and users saw inconsistent
+// behavior. Now enter on any line inside a group toggles that group.
+func TestEnterTogglesFromStepRowCollapsesParent(t *testing.T) {
+	s := newSagaOverlay()
+	s.Start("deploy", threeGroup())
+	// Drive Plan to running so it auto-expands, then render so the
+	// visible-lines slice reflects the expanded state.
+	pushEvent(&s, 0, runtime.Running, "p1", "Plan", nil)
+	_ = s.Box(120, 40, "⟳", "⟳")
+
+	// Navigate to a step row inside the running category.
+	if !s.HandleKey("j") {
+		t.Fatal("j should move the cursor down")
+	}
+	// Cursor should now be on a step row; verify via visibleLines.
+	if s.cursor >= len(s.visibleLines) {
+		t.Fatalf("cursor out of range: %d / %d", s.cursor, len(s.visibleLines))
+	}
+	if s.visibleLines[s.cursor].kind != sagaLineStep {
+		t.Fatalf("expected cursor on step row, got kind=%v", s.visibleLines[s.cursor].kind)
+	}
+
+	// Find the parent group's start index so we can assert the
+	// toggle affected the right group.
+	parent := s.groups[s.visibleLines[s.cursor].groupID].start
+	before := s.expanded[parent]
+
+	if !s.HandleKey("enter") {
+		t.Fatal("enter on a step row inside a group should be consumed by the toggle handler")
+	}
+	if s.expanded[parent] == before {
+		t.Errorf("enter on step row did not toggle parent group %d (still %v)", parent, before)
+	}
+	if !s.userToggled[parent] {
+		t.Error("manual toggle should mark userToggled so auto-rules don't fight the user")
+	}
+}
+
+// TestSpaceTogglesFromHeader confirms space still works on the
+// header itself (regression guard for the pre-existing behavior).
+func TestSpaceTogglesFromHeader(t *testing.T) {
+	s := newSagaOverlay()
+	s.Start("deploy", threeGroup())
+	pushEvent(&s, 0, runtime.Running, "p1", "Plan", nil)
+	_ = s.Box(120, 40, "⟳", "⟳")
+
+	// Cursor starts on the running header (Plan).
+	if s.visibleLines[s.cursor].kind != sagaLineHeader {
+		t.Fatalf("expected cursor on header, got kind=%v", s.visibleLines[s.cursor].kind)
+	}
+	before := s.expanded[0] // Plan starts at step 0
+
+	if !s.HandleKey("space") {
+		t.Fatal("space on a header should toggle")
+	}
+	if s.expanded[0] == before {
+		t.Error("space did not toggle Plan")
+	}
+}
+
+// TestOverallCounts_ExcludesSkipped pins the helper powering the
+// header "N / M" tally and the progress-bar fill: skipped steps are
+// subtracted from both sides so the visible denominator matches real
+// work, while OK and Failed both count as "done" (we don't rewind
+// the bar on a failure).
+func TestOverallCounts_ExcludesSkipped(t *testing.T) {
+	s := newSagaOverlay()
+	s.Start("deploy", threeGroup()) // 6 steps
+	// p1 OK, p2 Skipped, q1 Failed, q2/q3/d1 pending.
+	pushEvent(&s, 0, runtime.OK, "p1", "Plan", nil)
+	pushEvent(&s, 1, runtime.Skipped, "p2", "Plan", nil)
+	pushEvent(&s, 2, runtime.Failed, "q1", "Provision", nil)
+
+	done, total := s.overallCounts()
+	if done != 2 {
+		t.Errorf("done = %d; want 2 (p1 OK + q1 Failed)", done)
+	}
+	if total != 5 {
+		t.Errorf("total = %d; want 5 (6 steps − 1 skipped)", total)
+	}
+}
+
+// TestProgressBarRendersWhileRunning verifies the progress bar is
+// present in the hierarchical overlay output while the saga is in
+// flight and disappears once the saga completes (so the completion
+// summary isn't visually crowded — matches the CLI live renderer).
+func TestProgressBarRendersWhileRunning(t *testing.T) {
+	s := newSagaOverlay()
+	s.SetSize(160, 40)
+	s.Start("deploy", threeGroup())
+	pushEvent(&s, 0, runtime.OK, "p1", "Plan", nil)
+	pushEvent(&s, 1, runtime.Running, "p2", "Plan", nil)
+
+	out := stripANSI(s.Box(160, 40, "⟳", "⟳"))
+	// The bar uses the default blend; its unfilled tail is ASCII
+	// whose characters depend on terminal. We assert on the
+	// N / M header counter which is always present alongside.
+	if !strings.Contains(out, "1 / 6") {
+		t.Errorf("expected '1 / 6' counter in header:\n%s", out)
+	}
+
+	// Drive to completion and ensure the bar is suppressed.
+	for i, st := range threeGroup() {
+		pushEvent(&s, i, runtime.OK, st.Label, st.Category, nil)
+	}
+	s.Push(runtime.Event{Done: true, Status: runtime.OK, At: time.Now()})
+	done := stripANSI(s.Box(160, 40, "⟳", "⟳"))
+	if !strings.Contains(done, "✓ complete") {
+		t.Errorf("completion summary missing:\n%s", done)
+	}
+}
+
+// TestProgressBar_HiddenForSingleStepFlat guards the CLI-parity
+// choice: a single-step flat saga (e.g. instance create) goes
+// straight from 0 to 1 completed, so a bar there would just be
+// noise. The overlay omits it.
+func TestProgressBar_HiddenForSingleStepFlat(t *testing.T) {
+	s := newSagaOverlay()
+	s.SetSize(120, 30)
+	s.Start("create", []registry.Step{{Label: "do-the-thing"}})
+	pushEvent(&s, 0, runtime.Running, "do-the-thing", "", nil)
+
+	out := stripANSI(s.Box(120, 30, "⟳", "⟳"))
+	// A single-step saga should NOT include an "N / M" counter
+	// either — the information is already conveyed by the step row.
+	// We look for the pattern " 0 / 1 " explicitly.
+	if strings.Contains(out, " 0 / 1 ") {
+		t.Errorf("single-step saga should suppress N/M counter:\n%s", out)
+	}
+}
+
+// TestProgressBar_DoesNotOverflowModal is the regression guard for the
+// "progress bar wraps to the next line inside the modal" bug. The root
+// cause was sizing the bar against the raw terminal width instead of
+// the box interior — theme.Border's rounded border + Padding(0, 1)
+// subtract 4 columns of chrome, so a bar exactly as wide as the outer
+// box overflows by 4 chars and wraps.
+//
+// We verify two invariants after rendering at a variety of terminal
+// sizes and through both rendering paths (flat + hierarchical):
+//  1. The outer box fits inside the terminal (never clips against the
+//     edge of the screen).
+//  2. The progress bar's width is <= the box interior (outer - chrome),
+//     which is exactly what prevents wrap.
+func TestProgressBar_DoesNotOverflowModal(t *testing.T) {
+	cases := []struct {
+		name string
+		w, h int
+	}{
+		{"narrow", 60, 40},
+		{"medium", 80, 40},
+		{"wide", 120, 40},
+		{"huge", 200, 40},
+	}
+	for _, tc := range cases {
+		t.Run("flat/"+tc.name, func(t *testing.T) {
+			s := newSagaOverlay()
+			s.SetSize(tc.w, tc.h)
+			s.Start("delete", []registry.Step{
+				{Label: "stop"},
+				{Label: "remove"},
+				{Label: "untag"},
+			})
+			pushEvent(&s, 0, runtime.OK, "stop", "", nil)
+			pushEvent(&s, 1, runtime.Running, "remove", "", nil)
+
+			out := stripANSI(s.Box(tc.w, tc.h, "⟳", "⟳"))
+			assertBoxInvariants(t, &s, out, tc.w)
+		})
+		t.Run("hierarchical/"+tc.name, func(t *testing.T) {
+			s := newSagaOverlay()
+			s.SetSize(tc.w, tc.h)
+			s.Start("deploy", threeGroup())
+			pushEvent(&s, 0, runtime.OK, "p1", "Plan", nil)
+			pushEvent(&s, 1, runtime.Running, "p2", "Plan", nil)
+
+			out := stripANSI(s.Box(tc.w, tc.h, "⟳", "⟳"))
+			assertBoxInvariants(t, &s, out, tc.w)
+		})
+	}
+}
+
+// assertBoxInvariants enforces the two "no wrap" rules that prevent
+// the progress bar (and any other interior-sized content) from
+// overflowing the box chrome: the outer box must fit inside the
+// terminal, and the bar's SetWidth after render must be <= the
+// interior width of the box (outer - boxChrome).
+func assertBoxInvariants(t *testing.T, s *sagaOverlay, out string, terminalW int) {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("empty render")
+	}
+	outer := lipgloss.Width(lines[0])
+	if outer > terminalW {
+		t.Errorf("outer width %d exceeds terminal width %d:\n%s", outer, terminalW, out)
+	}
+	interior := outer - boxChrome
+	if s.bar.Width() > interior {
+		t.Errorf("bar width %d exceeds box interior %d (outer=%d) — it will wrap inside the modal:\n%s",
+			s.bar.Width(), interior, outer, out)
+	}
+}

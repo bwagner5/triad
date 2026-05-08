@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/progress"
 	"charm.land/lipgloss/v2"
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/runtime"
@@ -26,7 +27,14 @@ type sagaOverlay struct {
 	err       error
 	output    string
 	startedAt time.Time
+	doneAt    time.Time // set the first time we observe done=true; drives the post-completion grace window
 	w, h      int
+
+	// bar is the overall progress indicator shown under the header
+	// while the saga is in flight. Ticks as steps complete (non-
+	// skipped OK + Failed / total non-skipped). Mirrors the style
+	// used by the CLI live renderer so both UIs feel consistent.
+	bar progress.Model
 
 	// Step skeleton recorded by Start(). Groups are derived from the
 	// Category field without touching event buffers; when steps is nil
@@ -73,23 +81,43 @@ const (
 	sagaLineFlatStep                     // uncategorized step at top level
 )
 
+// boxChrome is the horizontal overhead theme.Border adds to any content
+// it renders: 1 column of rounded-border glyph + 1 column of Padding(0,1)
+// on each side → 4 columns total. lipgloss.Style.Width sets the outer
+// block width, so the actual usable interior is outer - boxChrome; we
+// must size interior-sensitive content (progress bar in particular) to
+// that interior width, not to the outer width, otherwise it wraps onto
+// a second line inside the modal.
+const boxChrome = 4
+
 func newSagaOverlay() sagaOverlay {
 	return sagaOverlay{
 		expanded:    map[int]bool{},
 		userToggled: map[int]bool{},
 		seenStatus:  map[int]string{},
+		bar:         progress.New(progress.WithDefaultBlend(), progress.WithoutPercentage()),
 	}
 }
 
-func (s *sagaOverlay) SetSize(w, h int) { s.w, s.h = w, h }
-func (s *sagaOverlay) Active() bool     { return s.active }
+func (s *sagaOverlay) SetSize(w, h int) {
+	s.w, s.h = w, h
+	// Bar width is recomputed per-render against the actual box
+	// interior (see renderFlat / renderHierarchical) — sizing it from
+	// the raw terminal width here would ignore the modal's border +
+	// padding chrome and let the bar overflow onto a second line.
+}
+func (s *sagaOverlay) Active() bool { return s.active }
 func (s *sagaOverlay) Clear() {
-	// Preserve size only; drop every other field.
+	// Preserve size + bar model (keeping the progress.Model alive
+	// means we don't re-allocate it per op and the gradient blend
+	// stays consistent between runs).
+	bar := s.bar
 	*s = sagaOverlay{
 		w: s.w, h: s.h,
 		expanded:    map[int]bool{},
 		userToggled: map[int]bool{},
 		seenStatus:  map[int]string{},
+		bar:         bar,
 	}
 }
 
@@ -122,6 +150,14 @@ func (s *sagaOverlay) Push(e runtime.Event) {
 		s.name = e.Saga
 	}
 	if e.Done {
+		// Stamp the first time we observe done=true so the grace
+		// window is anchored to the first Done event (the runtime
+		// publishes Done both to the bus and the saga channel, so
+		// handleSagaEvent can be called twice — we don't want the
+		// second call to reset the window).
+		if s.doneAt.IsZero() {
+			s.doneAt = time.Now()
+		}
 		s.done = true
 		s.err = e.Err
 		s.output = e.Output
@@ -146,10 +182,38 @@ func (s *sagaOverlay) Push(e runtime.Event) {
 	}
 }
 
+// minDoneDisplay is how long the overlay stays visible after a saga
+// completes, even if the user hammers esc/enter. Gives a beat for
+// reading the outcome (success summary, failure detail, endpoints)
+// before anything is torn down.
+const minDoneDisplay = 3 * time.Second
+
+// dismissable reports whether the overlay is eligible for an
+// enter/esc-driven dismiss right now. Always true while the saga is
+// running (esc aborts) and for flat single-phase sagas (nothing to
+// read, no point forcing a delay). For hierarchical sagas — the ones
+// worth reading — we hold off dismissal until the minDoneDisplay
+// grace window elapses so users aren't yanked out by their "confirm"
+// muscle memory.
+func (s *sagaOverlay) dismissable() bool {
+	if !s.done {
+		return true
+	}
+	if !s.hasCategories() {
+		return true
+	}
+	if s.doneAt.IsZero() {
+		return true
+	}
+	return time.Since(s.doneAt) >= minDoneDisplay
+}
+
 // DismissAfter returns a command that sends dismissSagaMsg after a delay,
-// giving the user time to read the completed workflow steps.
+// giving the user time to read the completed workflow steps. The
+// success-case delay matches minDoneDisplay so the auto-dismiss and
+// manual-dismiss grace windows agree.
 func (s *sagaOverlay) DismissAfter() tea.Cmd {
-	d := 4 * time.Second
+	d := minDoneDisplay
 	if s.err != nil {
 		d = 6 * time.Second
 	}
@@ -195,14 +259,22 @@ func (s *sagaOverlay) HandleKey(key string) bool {
 		}
 		return false
 	case "enter", " ", "space":
-		if gid, ok := s.cursorHeader(); ok {
-			s.expanded[gid] = !s.expanded[gid]
-			s.userToggled[gid] = true
+		// Toggle the group under (or containing) the cursor. Works
+		// on category headers AND on their indented step rows so
+		// users don't have to precisely land on the header line —
+		// previously enter on a step row fell through to the
+		// dismiss handler, which made the toggle feel flaky
+		// ("sometimes it works, sometimes it doesn't"). Flat
+		// (uncategorized) rows have no group to toggle, so we let
+		// enter fall through to dismiss-on-done as before.
+		if gid, ok := s.cursorGroup(); ok {
+			g := s.groups[gid]
+			s.expanded[g.start] = !s.expanded[g.start]
+			s.userToggled[g.start] = true
 			return true
 		}
-		// Enter on a non-header line: let the outer dismiss-on-done
-		// path handle it. Returning false ensures the completed saga
-		// can still be dismissed with Enter on a step/flat row.
+		// Enter on a flat row or outside any group: let the outer
+		// dismiss-on-done path handle it.
 		return false
 	case "e":
 		for i := range s.groups {
@@ -228,6 +300,8 @@ func (s *sagaOverlay) HandleKey(key string) bool {
 
 // cursorHeader returns the group index for the header line under the
 // cursor, or (-1, false) if the cursor isn't on a category header.
+// Used by the arrow keys so → only expands and ← only collapses when
+// the user is precisely on the header, keeping the gesture unambiguous.
 func (s *sagaOverlay) cursorHeader() (int, bool) {
 	if s.cursor < 0 || s.cursor >= len(s.visibleLines) {
 		return -1, false
@@ -237,6 +311,26 @@ func (s *sagaOverlay) cursorHeader() (int, bool) {
 		return -1, false
 	}
 	return ln.groupID, true
+}
+
+// cursorGroup returns the group index for the non-flat group under
+// the cursor, whether the cursor sits on the header or on one of the
+// group's step rows. Used by enter/space so the toggle works from
+// anywhere inside a category — the most common source of "the toggle
+// doesn't work" reports. Flat step rows return (-1, false) since
+// they have no group to toggle.
+func (s *sagaOverlay) cursorGroup() (int, bool) {
+	if s.cursor < 0 || s.cursor >= len(s.visibleLines) {
+		return -1, false
+	}
+	ln := s.visibleLines[s.cursor]
+	switch ln.kind {
+	case sagaLineHeader, sagaLineStep:
+		if ln.groupID >= 0 && ln.groupID < len(s.groups) && !s.groups[ln.groupID].flat {
+			return ln.groupID, true
+		}
+	}
+	return -1, false
 }
 
 // hasCategories reports whether any group is a real category (non-flat).
@@ -250,24 +344,60 @@ func (s *sagaOverlay) hasCategories() bool {
 	return false
 }
 
-// Box renders the overlay. spinnerFrame is the current frame of the app's
-// spinner — passed in so Running steps show live animation.
-func (s *sagaOverlay) Box(w, h int, spinnerFrame string) string {
+// Box renders the overlay. stepSpinner is the current frame of the
+// per-step spinner — shown next to Running steps. categorySpinner is
+// the current frame of the category-header spinner, intentionally a
+// different glyph set so the two levels don't visually blur together
+// (see app.spinCategory).
+func (s *sagaOverlay) Box(w, h int, stepSpinner, categorySpinner string) string {
 	if !s.hasCategories() {
-		return s.renderFlat(w, spinnerFrame)
+		// Flat sagas have no category headers, so only the step
+		// spinner is meaningful here.
+		return s.renderFlat(w, stepSpinner)
 	}
-	return s.renderHierarchical(w, h, spinnerFrame)
+	return s.renderHierarchical(w, h, stepSpinner, categorySpinner)
 }
 
 // renderFlat is the legacy bare-list rendering used by operations with no
 // Category metadata. Kept byte-compatible with the pre-categories behavior.
 func (s *sagaOverlay) renderFlat(w int, spinnerFrame string) string {
 	elapsed := time.Since(s.startedAt).Truncate(time.Second)
+	done, total := s.overallCounts()
+
+	// Compute the final outer box width first, then derive the interior
+	// width the bar has to fit into. theme.Border.Width sets the outer
+	// block width (border + padding included), so if we sized the bar
+	// to the outer width it would overflow by boxChrome columns and
+	// wrap to a second line inside the modal.
+	width := 60
+	if w-boxChrome < width {
+		width = w - boxChrome
+	}
+	if width < 24 {
+		width = 24
+	}
+	interior := width - boxChrome
+	if interior < 10 {
+		interior = 10
+	}
+	s.bar.SetWidth(interior)
+
 	header := theme.Heading.Render("Running: "+s.name) + "  " + theme.MutedText.Render(elapsed.String())
 	if s.done {
 		header = theme.Heading.Render(s.name) + "  " + theme.MutedText.Render(elapsed.String())
 	}
-	lines := header + "\n\n"
+	// For flat sagas only show the counter / bar when there's more
+	// than one meaningful step — a single-step op (instance create,
+	// etc.) would just go 0 → 1 with nothing to see in between.
+	if total > 1 {
+		header += "  " + theme.MutedText.Render(fmt.Sprintf("%d / %d", done, total))
+	}
+	lines := header + "\n"
+	if !s.done && total > 1 {
+		pct := float64(done) / float64(total)
+		lines += s.bar.ViewAs(pct) + "\n"
+	}
+	lines += "\n"
 	for _, e := range s.events {
 		if e.Step == "" {
 			continue
@@ -297,17 +427,18 @@ func (s *sagaOverlay) renderFlat(w int, spinnerFrame string) string {
 		}
 		lines += "\n" + theme.MutedText.Render("press esc or enter to close")
 	}
-	width := 60
-	if w < width+4 {
-		width = w - 4
-	}
 	return theme.Border.Width(width).Render(lines)
 }
 
 // renderHierarchical draws category headers with expansion chevrons and
 // indented step rows under expanded groups. Called when at least one
 // group is a real category (non-flat).
-func (s *sagaOverlay) renderHierarchical(w, h int, spinnerFrame string) string {
+//
+// Two spinner frames are threaded through: categorySpinner drives the
+// header glyph for Running categories, stepSpinner drives the per-step
+// glyph for Running steps. Keeping them distinct avoids the visual
+// noise of two identical rotating spinners stacked on top of each other.
+func (s *sagaOverlay) renderHierarchical(w, h int, stepSpinner, categorySpinner string) string {
 	// Resolve derived status + expanded-ness for every group. Must run
 	// before we build visibleLines so the chevron and counts match.
 	s.refreshGroupStates()
@@ -315,12 +446,53 @@ func (s *sagaOverlay) renderHierarchical(w, h int, spinnerFrame string) string {
 	var lines []string
 	var visible []sagaLine
 
+	// Compute the interior (content) width up front so the progress
+	// bar can be sized to exactly fit inside the box chrome. Without
+	// this, SetWidth would use a stale "whole terminal" value and the
+	// bar would overflow theme.Border's border+padding and wrap onto
+	// a second line. The final outer width will be interior+boxChrome;
+	// we may grow interior later to fit a wider line (capped at maxW).
+	maxInterior := w - boxChrome
+	if maxInterior < 36 {
+		maxInterior = 36
+	}
+	if maxInterior > 100-boxChrome {
+		maxInterior = 100 - boxChrome
+	}
+	interior := 60 - boxChrome // default content width matching legacy 60 outer
+	if interior < 24 {
+		interior = 24
+	}
+	if interior > maxInterior {
+		interior = maxInterior
+	}
+	s.bar.SetWidth(interior)
+
 	elapsed := time.Since(s.startedAt).Truncate(time.Second)
+	done, total := s.overallCounts()
 	header := theme.Heading.Render("Running: "+s.name) + "  " + theme.MutedText.Render(elapsed.String())
 	if s.done {
 		header = theme.Heading.Render(s.name) + "  " + theme.MutedText.Render(elapsed.String())
 	}
-	lines = append(lines, header, "")
+	// Overall "N / M" counter: appended to the title line so the
+	// top-line status is always scannable. Only shown when we know
+	// the total (i.e. after Start() or the first non-zero Total
+	// field has arrived via Push); suppresses 0/0 noise on the first
+	// pre-event render.
+	if total > 0 {
+		header += "  " + theme.MutedText.Render(fmt.Sprintf("%d / %d", done, total))
+	}
+	lines = append(lines, header)
+
+	// Progress bar under the header. Hidden once the saga is done so
+	// the completion summary isn't crowded, mirroring the CLI live
+	// renderer's behavior. While running, a full-width blended bar
+	// ticks as steps transition to OK / Failed / Skipped.
+	if !s.done && total > 0 {
+		pct := float64(done) / float64(total)
+		lines = append(lines, s.bar.ViewAs(pct))
+	}
+	lines = append(lines, "")
 
 	// Seed the cursor to the first running category the first time we
 	// have one, unless the user has already taken manual control.
@@ -334,15 +506,15 @@ func (s *sagaOverlay) renderHierarchical(w, h int, spinnerFrame string) string {
 			// Flat (uncategorized) step: render flush-left.
 			lineIdx := len(visible)
 			visible = append(visible, sagaLine{kind: sagaLineFlatStep, groupID: gi, stepIdx: g.start})
-			lines = append(lines, s.renderFlatStepLine(g.start, spinnerFrame, lineIdx == s.cursor))
+			lines = append(lines, s.renderFlatStepLine(g.start, stepSpinner, lineIdx == s.cursor))
 			continue
 		}
 		st := s.computedStatus(g)
 		expanded := s.expanded[g.start]
-		// Header line.
+		// Header line — uses categorySpinner (distinct from step spinner).
 		hdrIdx := len(visible)
 		visible = append(visible, sagaLine{kind: sagaLineHeader, groupID: gi, stepIdx: -1})
-		lines = append(lines, s.renderGroupHeader(g, st, expanded, spinnerFrame, hdrIdx == s.cursor))
+		lines = append(lines, s.renderGroupHeader(g, st, expanded, categorySpinner, hdrIdx == s.cursor))
 		// Step rows (when expanded).
 		if expanded {
 			for i := g.start; i <= g.end; i++ {
@@ -359,7 +531,7 @@ func (s *sagaOverlay) renderHierarchical(w, h int, spinnerFrame string) string {
 				}
 				stepIdx := len(visible)
 				visible = append(visible, sagaLine{kind: sagaLineStep, groupID: gi, stepIdx: i})
-				lines = append(lines, s.renderStepLine(ev, spinnerFrame, stepIdx == s.cursor))
+				lines = append(lines, s.renderStepLine(ev, stepSpinner, stepIdx == s.cursor))
 			}
 		}
 	}
@@ -391,24 +563,21 @@ func (s *sagaOverlay) renderHierarchical(w, h int, spinnerFrame string) string {
 
 	body := strings.Join(lines, "\n")
 
-	// Compute width to fit the widest line, capped at terminal-width-4
-	// or 100, whichever is smaller.
-	width := 60
+	// Grow interior (content width) to fit the widest line, capped at
+	// the terminal-derived maxInterior. The bar was already sized to
+	// the initial interior; if interior grows past that here we leave
+	// the bar at its smaller size rather than re-rendering — it still
+	// fits strictly inside the chrome, which is all we need to avoid
+	// the overflow-wrap bug.
 	for _, ln := range lines {
-		if wv := lipgloss.Width(ln); wv > width {
-			width = wv
+		if wv := lipgloss.Width(ln); wv > interior {
+			interior = wv
 		}
 	}
-	maxW := w - 4
-	if maxW < 40 {
-		maxW = 40
+	if interior > maxInterior {
+		interior = maxInterior
 	}
-	if width > maxW {
-		width = maxW
-	}
-	if width > 100 {
-		width = 100
-	}
+	outer := interior + boxChrome
 
 	// Height cap: let the modal grow, but add a "… N more" footer if we
 	// have to clip. Full scrolling is a v2 concern.
@@ -427,7 +596,7 @@ func (s *sagaOverlay) renderHierarchical(w, h int, spinnerFrame string) string {
 		}
 	}
 
-	return theme.Border.Width(width).Render(body)
+	return theme.Border.Width(outer).Render(body)
 }
 
 // renderGroupHeader returns the "▶/▼ <mark> <name>  (n/total)   elapsed/took Ns"
@@ -520,6 +689,36 @@ func (s *sagaOverlay) renderFlatStepLine(stepIdx int, spinnerFrame string, curso
 		return theme.Value.Render("▸ ") + mark + " " + label
 	}
 	return "  " + mark + " " + label
+}
+
+// overallCounts aggregates progress across every step of the saga,
+// independent of category grouping. Drives the header's "N / M"
+// counter and the progress bar fill percentage. Skipped steps are
+// excluded from both sides so the visible denominator matches what
+// users actually see scroll by; OK and Failed both count as
+// "completed" (no sense rewinding the bar on a failure).
+func (s *sagaOverlay) overallCounts() (done, total int) {
+	size := len(s.steps)
+	if size == 0 {
+		return 0, 0
+	}
+	skipped := 0
+	for i := 0; i < size; i++ {
+		if i >= len(s.events) {
+			continue
+		}
+		switch s.events[i].Status {
+		case runtime.OK, runtime.Failed:
+			done++
+		case runtime.Skipped:
+			skipped++
+		}
+	}
+	total = size - skipped
+	if total < 0 {
+		total = 0
+	}
+	return done, total
 }
 
 // groupCounts returns completed, total, and allSkipped for a category.

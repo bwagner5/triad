@@ -490,6 +490,13 @@ type Operation struct {
 	// pick up the primary key from config / defaults (Prefill) but
 	// still genuinely require an existing row.
 	NeedsExistingRow bool
+	// SortKey, when non-empty, overrides the op's Name for display-
+	// order purposes in the TUI status bar, the "?" help overlay,
+	// and the command palette. Use it to cluster paired ops that
+	// would otherwise sort alphabetically apart (e.g. add-target /
+	// remove-target). Defaults to Name when unset — existing ops
+	// keep their current alphabetical position.
+	SortKey string
 }
 
 // Resource is the central declaration that drives all three UIs.

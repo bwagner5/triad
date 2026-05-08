@@ -861,3 +861,112 @@ var errTest = errForTest("boom")
 type errForTest string
 
 func (e errForTest) Error() string { return string(e) }
+
+// TestOperationSortKeyClustersPairedOps pins the SortKey contract:
+// ops with a non-empty SortKey sort by that value instead of by
+// Name. The canonical use case is pairing add-target / remove-
+// target so they land adjacent in the status bar and "?" help,
+// instead of alphabetically split (a… vs r…).
+func TestOperationSortKeyClustersPairedOps(t *testing.T) {
+	type row struct{ Name string }
+	reg := registry.New()
+	reg.Register(registry.Resource{
+		Name: "app", Plural: "apps", Store: fakeStore{},
+		Fields: []registry.Field{
+			{Name: "Name", Flag: "name", Table: registry.TableHint{Header: "NAME"}},
+		},
+		Operations: map[string]registry.Operation{
+			"add-target": {
+				Name: "add-target", Key: "t",
+				Fields: []registry.Field{{Flag: "name", Required: true}},
+				Steps:  []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
+			},
+			// Would alphabetically sort BEFORE remove-target and
+			// split the pair — SortKey overrides that.
+			"delete": {
+				Name: "delete", Key: "ctrl+d",
+				Fields: []registry.Field{{Flag: "name", Required: true}},
+				Steps:  []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
+			},
+			"remove-target": {
+				Name: "remove-target", Key: "T",
+				SortKey: "add-target-remove",
+				Fields:  []registry.Field{{Flag: "name", Required: true}},
+				Steps:   []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
+			},
+		},
+	})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	a.items = []any{row{Name: "my-app"}}
+	a.cursor = 0
+
+	// Collect ops from the key map in order; we only care about the
+	// "Resource" category and that add-target / remove-target are
+	// adjacent with add-target first.
+	var resourceLabels []string
+	for _, b := range a.keyMap() {
+		if b.Cat != "Resource" {
+			continue
+		}
+		resourceLabels = append(resourceLabels, b.Label)
+	}
+
+	addIdx, removeIdx := -1, -1
+	for i, l := range resourceLabels {
+		if l == "add-target" {
+			addIdx = i
+		}
+		if l == "remove-target" {
+			removeIdx = i
+		}
+	}
+	if addIdx < 0 || removeIdx < 0 {
+		t.Fatalf("add-target/remove-target missing from keymap: %v", resourceLabels)
+	}
+	if removeIdx != addIdx+1 {
+		t.Errorf("remove-target at %d, add-target at %d; want remove-target immediately after add-target. Full order: %v",
+			removeIdx, addIdx, resourceLabels)
+	}
+}
+
+// TestOperationSortKeyEmptyFallsBackToName confirms backward
+// compatibility: ops without a SortKey keep sorting by their Name,
+// so existing resources don't shift order unexpectedly.
+func TestOperationSortKeyEmptyFallsBackToName(t *testing.T) {
+	type row struct{ Name string }
+	reg := registry.New()
+	reg.Register(registry.Resource{
+		Name: "app", Plural: "apps", Store: fakeStore{},
+		Fields: []registry.Field{
+			{Name: "Name", Flag: "name", Table: registry.TableHint{Header: "NAME"}},
+		},
+		Operations: map[string]registry.Operation{
+			"alpha": {
+				Name: "alpha", Key: "a",
+				Fields: []registry.Field{{Flag: "name", Required: true}},
+				Steps:  []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
+			},
+			"beta": {
+				Name: "beta", Key: "b",
+				Fields: []registry.Field{{Flag: "name", Required: true}},
+				Steps:  []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
+			},
+		},
+	})
+	a := newApp(context.Background(), reg, Options{Name: "test"})
+	a.resource = ptr(reg.All()[0])
+	a.items = []any{row{Name: "x"}}
+	a.cursor = 0
+
+	var labels []string
+	for _, b := range a.keyMap() {
+		if b.Cat != "Resource" {
+			continue
+		}
+		labels = append(labels, b.Label)
+	}
+	if len(labels) < 2 || labels[0] != "alpha" || labels[1] != "beta" {
+		t.Errorf("default alphabetical order lost: %v", labels)
+	}
+}

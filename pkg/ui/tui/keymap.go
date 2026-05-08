@@ -102,13 +102,22 @@ func (a *app) keyMap() []binding {
 
 	// ---- Resource (contextual: from current resource's operations) ----
 	if a.resource != nil {
-		opNames := make([]string, 0, len(a.resource.Operations))
-		for name := range a.resource.Operations {
-			opNames = append(opNames, name)
+		// Build an ordering slice: (sortKey, name) so ops with
+		// SortKey set cluster in the desired position (e.g.
+		// add-target / remove-target). Ops without SortKey fall
+		// back to Name, preserving the existing alphabetical order.
+		type opOrder struct{ sortKey, name string }
+		order := make([]opOrder, 0, len(a.resource.Operations))
+		for name, op := range a.resource.Operations {
+			k := op.SortKey
+			if k == "" {
+				k = name
+			}
+			order = append(order, opOrder{sortKey: k, name: name})
 		}
-		sort.Strings(opNames)
-		for _, name := range opNames {
-			op := a.resource.Operations[name]
+		sort.Slice(order, func(i, j int) bool { return order[i].sortKey < order[j].sortKey })
+		for _, o := range order {
+			op := a.resource.Operations[o.name]
 			if op.Key == "" {
 				continue
 			}

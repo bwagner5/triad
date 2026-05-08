@@ -106,7 +106,14 @@ type app struct {
 	// replace). Subsequent batches within the same gen append. Keeps the
 	// old table visible during refresh until new data arrives.
 	seenGen int
-	spin    spinner.Model
+	// spin drives per-step spinners in the saga overlay and
+	// async-field cells. Uses the default Line spinner (|/-\).
+	spin spinner.Model
+	// spinCategory drives spinners on category headers in the saga
+	// overlay. Uses Pulse (█▓▒░) so it's visually distinct from
+	// the step-level spinner — two identical spinners side by side
+	// is distracting.
+	spinCategory spinner.Model
 
 	// async is the store for Field.Async results, keyed by
 	// (resource, primary key, field name). Loaders run in goroutines
@@ -164,7 +171,7 @@ func newApp(ctx context.Context, reg *registry.Registry, opts Options) *app {
 	if opts.Logo == "" {
 		opts.Logo = lipgloss.NewStyle().Foreground(theme.Warning).Render(ascii.Render(opts.Name))
 	}
-	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), bus: runtime.NewBus(), palette: newPalette(reg, opts.GlobalOps), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New(), initialLoad: true, async: map[asyncKey]*asyncState{}}
+	a := &app{ctx: ctx, reg: reg, opts: opts, sched: runtime.NewScheduler(), bus: runtime.NewBus(), palette: newPalette(reg, opts.GlobalOps), help: newHelp(), saga: newSagaOverlay(), wizard: newWizardOverlay(), spin: spinner.New(), spinCategory: spinner.New(spinner.WithSpinner(spinner.Pulse)), initialLoad: true, async: map[asyncKey]*asyncState{}}
 	fti := textinput.New()
 	fti.Prompt = "/ "
 	fti.Placeholder = "filter…"
@@ -225,7 +232,7 @@ type asyncFieldMsg struct {
 type sagaEventMsg runtime.Event
 
 func (a *app) Init() tea.Cmd {
-	return tea.Batch(a.refresh(), a.subscribeBus(), a.repaintTick(), a.spin.Tick)
+	return tea.Batch(a.refresh(), a.subscribeBus(), a.repaintTick(), a.spin.Tick, a.spinCategory.Tick)
 }
 
 // repaintTick drives 1-second UI repaints so the refresh countdown updates.
@@ -569,9 +576,13 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case spinner.TickMsg:
-		var cmd tea.Cmd
+		// Each spinner filters ticks by ID internally, so it's safe
+		// (and necessary) to forward every TickMsg to both spinners —
+		// only the matching one actually advances.
+		var cmd, cmd2 tea.Cmd
 		a.spin, cmd = a.spin.Update(msg)
-		return a, cmd
+		a.spinCategory, cmd2 = a.spinCategory.Update(msg)
+		return a, tea.Batch(cmd, cmd2)
 	case asyncFieldMsg:
 		return a.handleAsyncField(msg)
 	}
@@ -806,6 +817,15 @@ func (a *app) handleSagaOverlayKey(key string) (tea.Model, tea.Cmd) {
 	if a.saga.HandleKey(key) {
 		return a, nil
 	}
+	// Post-completion grace: swallow esc/enter for a short beat so
+	// the user has time to actually read the outcome instead of
+	// their "confirm" muscle memory tearing the overlay down. The
+	// auto-dismiss tick fires at the same grace boundary and closes
+	// the overlay on its own. While the saga is still running esc
+	// is allowed (it aborts).
+	if !a.saga.dismissable() {
+		return a, nil
+	}
 	if key == "esc" || (a.saga.done && key == "enter") {
 		a.saga.Clear()
 		return a, nil
@@ -1009,7 +1029,7 @@ func (a *app) View() tea.View {
 		overlays = append(overlays, centeredLayer(a.palette.Box(w, h), w, h, 3))
 	}
 	if a.saga.Active() {
-		overlays = append(overlays, centeredLayer(a.saga.Box(w, h, a.spin.View()), w, h, 4))
+		overlays = append(overlays, centeredLayer(a.saga.Box(w, h, a.spin.View(), a.spinCategory.View()), w, h, 4))
 	}
 	if a.confirm.Active() {
 		overlays = append(overlays, centeredLayer(a.confirm.Box(w, h), w, h, 5))
