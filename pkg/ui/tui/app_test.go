@@ -889,7 +889,7 @@ func TestOperationSortKeyClustersPairedOps(t *testing.T) {
 				Steps:  []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},
 			},
 			"remove-target": {
-				Name: "remove-target", Key: "T",
+				Name: "remove-target", Key: "shift+t",
 				SortKey: "add-target-remove",
 				Fields:  []registry.Field{{Flag: "name", Required: true}},
 				Steps:   []registry.Step{{Label: "n", Do: func(context.Context, *registry.State) error { return nil }}},

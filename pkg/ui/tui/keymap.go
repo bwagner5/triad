@@ -148,7 +148,7 @@ func (a *app) keyMap() []binding {
 			})
 		}
 	}
-	bs = append(bs, binding{Key: "r", Label: "refresh", Cat: "Resource", Run: func(a *app) (tea.Model, tea.Cmd) {
+	bs = append(bs, binding{Key: "shift+r", Label: "refresh", Cat: "Resource", Run: func(a *app) (tea.Model, tea.Cmd) {
 		return a, a.refresh()
 	}})
 

@@ -568,6 +568,14 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, a.refresh()
 	case dismissSagaMsg:
+		// Auto-dismiss only fires when the user is looking at the
+		// expanded overlay. If they minimized to the pill, leave the
+		// DONE/ERROR badge in place until they manually dismiss it —
+		// silently clearing a backgrounded saga would erase the only
+		// surface they have to learn the outcome.
+		if a.saga.Minimized() {
+			return a, nil
+		}
 		a.saga.Clear()
 		a.sagaCh = nil
 	case detailFetchedMsg:
@@ -634,8 +642,17 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Saga overlay: j/k/enter navigate categories; esc dismisses;
 	// enter dismisses when the saga finished and isn't sitting on a
 	// category header (a toggleable cursor consumes enter first).
+	// `-` toggles minimize at any time the saga is active. Other keys
+	// fall through to the normal handler when minimized so the user
+	// can still navigate the table while a saga runs in the corner.
 	if a.saga.Active() {
-		return a.handleSagaOverlayKey(key)
+		if key == "-" {
+			a.saga.ToggleMinimize()
+			return a, nil
+		}
+		if !a.saga.Minimized() {
+			return a.handleSagaOverlayKey(key)
+		}
 	}
 
 	if a.showPalette {
@@ -1015,7 +1032,11 @@ func (a *app) View() tea.View {
 
 	base := lipgloss.JoinVertical(lipgloss.Left, header, body, bottom)
 
-	overlayActive := a.showHelp || a.showPalette || a.saga.Active() || a.confirm.Active() || a.wizard.Active() || a.review.Active()
+	// Minimized saga doesn't grab focus — the user is navigating the
+	// underlying table while a small status pill sits in the corner.
+	// Don't dim the background and don't count it as an "active overlay".
+	sagaExpanded := a.saga.Expanded()
+	overlayActive := a.showHelp || a.showPalette || sagaExpanded || a.confirm.Active() || a.wizard.Active() || a.review.Active()
 	rootContent := base
 	if overlayActive {
 		rootContent = dimBackground(base)
@@ -1028,8 +1049,11 @@ func (a *app) View() tea.View {
 	if a.showPalette {
 		overlays = append(overlays, centeredLayer(a.palette.Box(w, h), w, h, 3))
 	}
-	if a.saga.Active() {
+	if sagaExpanded {
 		overlays = append(overlays, centeredLayer(a.saga.Box(w, h, a.spin.View(), a.spinCategory.View()), w, h, 4))
+	}
+	if a.saga.Minimized() {
+		overlays = append(overlays, topRightLayer(a.saga.Pill(), w, 4))
 	}
 	if a.confirm.Active() {
 		overlays = append(overlays, centeredLayer(a.confirm.Box(w, h), w, h, 5))
@@ -1091,6 +1115,18 @@ func centeredLayer(content string, w, h, z int) *lipgloss.Layer {
 		y = 0
 	}
 	return lipgloss.NewLayer(content).X(x).Y(y).Z(z)
+}
+
+// topRightLayer pins content to the top-right corner of the screen,
+// one row down from the very top so the banner ascii art isn't
+// occluded. Used by the minimized saga pill.
+func topRightLayer(content string, w, z int) *lipgloss.Layer {
+	cw := lipgloss.Width(content)
+	x := w - cw - 1
+	if x < 0 {
+		x = 0
+	}
+	return lipgloss.NewLayer(content).X(x).Y(0).Z(z)
 }
 
 // renderHeader builds the top block:

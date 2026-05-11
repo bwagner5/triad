@@ -32,6 +32,13 @@ var (
 	ToastOK  = lipgloss.NewStyle().Background(Success).Foreground(lipgloss.Color("#0b0f14")).Bold(true).Padding(0, 2)
 	ToastErr = lipgloss.NewStyle().Background(Danger).Foreground(lipgloss.Color("#0b0f14")).Bold(true).Padding(0, 2)
 
+	// Saga minimize pill: rendered in the top-right when the user
+	// minimizes the workflow overlay. PillRun stays green while the
+	// saga is in flight and on success; PillErr turns red on failure.
+	PillRun = lipgloss.NewStyle().Background(Success).Foreground(lipgloss.Color("#0b0f14")).Bold(true).Padding(0, 1)
+	PillOK  = lipgloss.NewStyle().Background(Success).Foreground(lipgloss.Color("#0b0f14")).Bold(true).Padding(0, 1)
+	PillErr = lipgloss.NewStyle().Background(Danger).Foreground(lipgloss.Color("#0b0f14")).Bold(true).Padding(0, 1)
+
 	// Border is the default style for overlay modals (help, palette, saga, wizard).
 	Border = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).

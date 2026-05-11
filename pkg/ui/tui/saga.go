@@ -30,6 +30,14 @@ type sagaOverlay struct {
 	doneAt    time.Time // set the first time we observe done=true; drives the post-completion grace window
 	w, h      int
 
+	// minimized collapses the centered modal into a small status pill in
+	// the top-right corner of the TUI. The saga continues running and
+	// events keep accumulating; only the rendering changes. Press `-` to
+	// toggle (handled in handleSagaOverlayKey). When minimized while
+	// done, the pill stays put until the user restores and dismisses —
+	// that's by design so a backgrounded saga can't silently disappear.
+	minimized bool
+
 	// bar is the overall progress indicator shown under the header
 	// while the saga is in flight. Ticks as steps complete (non-
 	// skipped OK + Failed / total non-skipped). Mirrors the style
@@ -106,7 +114,10 @@ func (s *sagaOverlay) SetSize(w, h int) {
 	// the raw terminal width here would ignore the modal's border +
 	// padding chrome and let the bar overflow onto a second line.
 }
-func (s *sagaOverlay) Active() bool { return s.active }
+func (s *sagaOverlay) Active() bool    { return s.active }
+func (s *sagaOverlay) Minimized() bool  { return s.active && s.minimized }
+func (s *sagaOverlay) Expanded() bool   { return s.active && !s.minimized }
+func (s *sagaOverlay) ToggleMinimize()  { s.minimized = !s.minimized }
 func (s *sagaOverlay) Clear() {
 	// Preserve size + bar model (keeping the progress.Model alive
 	// means we don't re-allocate it per op and the gradient blend
@@ -195,8 +206,15 @@ const minDoneDisplay = 3 * time.Second
 // worth reading — we hold off dismissal until the minDoneDisplay
 // grace window elapses so users aren't yanked out by their "confirm"
 // muscle memory.
+//
+// On failure we drop the grace window: the user needs to dismiss
+// manually anyway (DismissAfter returns nil for errors), so making
+// them wait before enter/esc works is just friction.
 func (s *sagaOverlay) dismissable() bool {
 	if !s.done {
+		return true
+	}
+	if s.err != nil {
 		return true
 	}
 	if !s.hasCategories() {
@@ -208,16 +226,33 @@ func (s *sagaOverlay) dismissable() bool {
 	return time.Since(s.doneAt) >= minDoneDisplay
 }
 
+// elapsed returns the saga's wall-clock duration, truncated to whole
+// seconds. While the saga is running it advances with the wall clock;
+// once the first done event is observed it freezes at doneAt-startedAt
+// so the elapsed counter doesn't keep ticking past completion (and
+// past the visible failure surface).
+func (s *sagaOverlay) elapsed() time.Duration {
+	if s.done && !s.doneAt.IsZero() {
+		return s.doneAt.Sub(s.startedAt).Truncate(time.Second)
+	}
+	return time.Since(s.startedAt).Truncate(time.Second)
+}
+
 // DismissAfter returns a command that sends dismissSagaMsg after a delay,
 // giving the user time to read the completed workflow steps. The
 // success-case delay matches minDoneDisplay so the auto-dismiss and
 // manual-dismiss grace windows agree.
+//
+// On failure we return nil — the overlay stays put until the user
+// hits enter or esc. Auto-dismissing an error overlay races the user
+// reading the failure detail, which is the one thing they actually
+// need to see. dismissable() still returns true immediately on
+// failure so enter/esc work right away.
 func (s *sagaOverlay) DismissAfter() tea.Cmd {
-	d := minDoneDisplay
 	if s.err != nil {
-		d = 6 * time.Second
+		return nil
 	}
-	return tea.Tick(d, func(_ time.Time) tea.Msg { return dismissSagaMsg{} })
+	return tea.Tick(minDoneDisplay, func(_ time.Time) tea.Msg { return dismissSagaMsg{} })
 }
 
 // HandleKey consumes a keystroke while the overlay is active. Returns
@@ -358,10 +393,79 @@ func (s *sagaOverlay) Box(w, h int, stepSpinner, categorySpinner string) string 
 	return s.renderHierarchical(w, h, stepSpinner, categorySpinner)
 }
 
+// Pill renders the minimized status badge plus a muted hint line
+// pointing the user back to `-` for restoring the full overlay.
+// Color encodes state:
+//   - running:   green background, name + current step + elapsed
+//   - succeeded: green background, "DONE" + elapsed
+//   - failed:    red background, "ERROR" + elapsed
+//
+// The hint is right-aligned to the pill's width so the two-line
+// block reads as a tidy unit anchored to the top-right corner.
+func (s *sagaOverlay) Pill() string {
+	elapsed := s.elapsed()
+	var label, body, pill string
+	switch {
+	case s.done && s.err != nil:
+		label = "ERROR"
+		body = fmt.Sprintf("%s  %s  %s", label, s.name, formatSagaDuration(elapsed))
+		pill = theme.PillErr.Render(body)
+	case s.done:
+		label = "DONE"
+		body = fmt.Sprintf("%s  %s  %s", label, s.name, formatSagaDuration(elapsed))
+		pill = theme.PillOK.Render(body)
+	default:
+		step := s.currentStepLabel()
+		if step == "" {
+			body = fmt.Sprintf("%s  %s", s.name, formatSagaDuration(elapsed))
+		} else {
+			body = fmt.Sprintf("%s  %s  %s", s.name, step, formatSagaDuration(elapsed))
+		}
+		pill = theme.PillRun.Render(body)
+	}
+	hint := theme.MutedText.Render("press - to restore")
+	// Right-align the hint to the pill's rendered width so the block
+	// reads as a unit. Pad with spaces (no styled background) so the
+	// padding stays transparent over the underlying content.
+	pillW := lipgloss.Width(pill)
+	hintW := lipgloss.Width(hint)
+	if hintW < pillW {
+		hint = strings.Repeat(" ", pillW-hintW) + hint
+	}
+	return pill + "\n" + hint
+}
+
+// currentStepLabel returns the label of the most recent Running
+// step, falling back to the latest non-skipped event's label, then
+// the empty string. Used by the minimized pill so the user can see
+// where the saga is at without restoring the full overlay.
+func (s *sagaOverlay) currentStepLabel() string {
+	// Scan in reverse: the latest Running event wins.
+	for i := len(s.events) - 1; i >= 0; i-- {
+		e := s.events[i]
+		if e.Step == "" {
+			continue
+		}
+		if e.Status == runtime.Running {
+			return e.Step
+		}
+	}
+	// No running step — show the most recent non-skipped step (e.g.
+	// during the gap between two steps in a single category).
+	for i := len(s.events) - 1; i >= 0; i-- {
+		e := s.events[i]
+		if e.Step == "" || e.Status == runtime.Skipped {
+			continue
+		}
+		return e.Step
+	}
+	return ""
+}
+
 // renderFlat is the legacy bare-list rendering used by operations with no
 // Category metadata. Kept byte-compatible with the pre-categories behavior.
 func (s *sagaOverlay) renderFlat(w int, spinnerFrame string) string {
-	elapsed := time.Since(s.startedAt).Truncate(time.Second)
+	elapsed := s.elapsed()
 	done, total := s.overallCounts()
 
 	// Compute the final outer box width first, then derive the interior
@@ -425,7 +529,7 @@ func (s *sagaOverlay) renderFlat(w int, spinnerFrame string) string {
 				lines += "\n" + s.output + "\n"
 			}
 		}
-		lines += "\n" + theme.MutedText.Render("press esc or enter to close")
+		lines += "\n" + theme.MutedText.Render("- minimize · esc/enter to close")
 	}
 	return theme.Border.Width(width).Render(lines)
 }
@@ -468,7 +572,7 @@ func (s *sagaOverlay) renderHierarchical(w, h int, stepSpinner, categorySpinner 
 	}
 	s.bar.SetWidth(interior)
 
-	elapsed := time.Since(s.startedAt).Truncate(time.Second)
+	elapsed := s.elapsed()
 	done, total := s.overallCounts()
 	header := theme.Heading.Render("Running: "+s.name) + "  " + theme.MutedText.Render(elapsed.String())
 	if s.done {
@@ -558,7 +662,7 @@ func (s *sagaOverlay) renderHierarchical(w, h int, stepSpinner, categorySpinner 
 	}
 
 	// Footer hint. Muted and small; replaces the legacy dismiss line.
-	footer := theme.MutedText.Render("j/k navigate · enter toggle · e expand all · c collapse all · esc close")
+	footer := theme.MutedText.Render("j/k navigate · enter toggle · e expand all · c collapse all · - minimize · esc close")
 	lines = append(lines, "", footer)
 
 	body := strings.Join(lines, "\n")

@@ -243,8 +243,66 @@ func TestUngroupedSagaRendersAsToday(t *testing.T) {
 			t.Errorf("ungrouped saga must render as today (no %q); got:\n%s", forbidden, out)
 		}
 	}
-	if !strings.Contains(out, "press esc or enter to close") {
+	if !strings.Contains(out, "esc/enter to close") {
 		t.Errorf("legacy dismiss hint missing:\n%s", out)
+	}
+}
+
+// TestPillRendersStateAndStep covers the minimized-pill path: while
+// running, it shows the saga name + current Running step + elapsed
+// duration; on success it switches to "DONE"; on failure it switches
+// to "ERROR".
+func TestPillRendersStateAndStep(t *testing.T) {
+	s := newSagaOverlay()
+	s.Start("deploy", []registry.Step{{Label: "build"}, {Label: "push"}})
+	pushEvent(&s, 0, runtime.Running, "build", "", nil)
+
+	running := stripANSI(s.Pill())
+	if !strings.Contains(running, "deploy") || !strings.Contains(running, "build") {
+		t.Errorf("running pill missing name or step: %q", running)
+	}
+	for _, forbidden := range []string{"DONE", "ERROR"} {
+		if strings.Contains(running, forbidden) {
+			t.Errorf("running pill should not contain %q: %q", forbidden, running)
+		}
+	}
+
+	pushEvent(&s, 0, runtime.OK, "build", "", nil)
+	s.Push(runtime.Event{Done: true, Status: runtime.OK, At: time.Now()})
+	doneOK := stripANSI(s.Pill())
+	if !strings.Contains(doneOK, "DONE") {
+		t.Errorf("done-OK pill should say DONE: %q", doneOK)
+	}
+
+	s2 := newSagaOverlay()
+	s2.Start("deploy", []registry.Step{{Label: "build"}})
+	pushEvent(&s2, 0, runtime.Failed, "build", "", errors.New("boom"))
+	s2.Push(runtime.Event{Done: true, Status: runtime.Failed, Err: errors.New("boom"), At: time.Now()})
+	doneErr := stripANSI(s2.Pill())
+	if !strings.Contains(doneErr, "ERROR") {
+		t.Errorf("done-error pill should say ERROR: %q", doneErr)
+	}
+}
+
+// TestMinimizeToggle covers the Active/Minimized/Expanded predicates
+// used by the View() router: starting a saga is Expanded; toggling
+// flips it to Minimized; toggling again goes back to Expanded.
+func TestMinimizeToggle(t *testing.T) {
+	s := newSagaOverlay()
+	if s.Active() || s.Minimized() || s.Expanded() {
+		t.Fatalf("freshly-built overlay should be inactive")
+	}
+	s.Start("op", nil)
+	if !s.Expanded() || s.Minimized() {
+		t.Errorf("after Start, want Expanded; got minimized=%v expanded=%v", s.Minimized(), s.Expanded())
+	}
+	s.ToggleMinimize()
+	if !s.Minimized() || s.Expanded() {
+		t.Errorf("after first toggle, want Minimized; got minimized=%v expanded=%v", s.Minimized(), s.Expanded())
+	}
+	s.ToggleMinimize()
+	if !s.Expanded() || s.Minimized() {
+		t.Errorf("after second toggle, want Expanded; got minimized=%v expanded=%v", s.Minimized(), s.Expanded())
 	}
 }
 

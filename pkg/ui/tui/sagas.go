@@ -40,6 +40,14 @@ func (a *app) launchOp(res *registry.Resource, op *registry.Operation, input reg
 	if input == nil {
 		input = registry.Input{}
 	}
+	// Refuse to start a second op while one is in flight (including
+	// when minimized to the corner pill). The runtime + UI assume one
+	// saga at a time; concurrent state would corrupt sagaCh and the
+	// overlay's event slice. Surfaces a toast so the user understands
+	// why the keypress did nothing instead of just dropping it.
+	if a.saga.Active() {
+		return a.showToast(toastErr, "another operation is in progress — press - to restore")
+	}
 	// Run Pre (e.g. hydrate defaults from a config file) so the 'missing'
 	// calculation below sees a fully-populated Input. Pre errors bubble
 	// up as a toast via the same Failed-event path the saga uses so the
