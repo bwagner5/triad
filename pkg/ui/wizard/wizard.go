@@ -4,6 +4,13 @@
 //
 // Fields with a Suggest function render as a single-selection list; fields
 // without one render as a text input.
+//
+// Per-field state (answers, choice cursors, multi-select checkboxes,
+// loaded Suggest choices, the "already answered" history) lives in
+// wizardstate.State, which the TUI wizard overlay also uses. Sharing
+// State means both UIs agree on visibility cascades, GoBack semantics,
+// and submit behavior, and a future Ctrl+T handoff can swap UIs
+// mid-run without losing the user's progress.
 package wizard
 
 import (
@@ -18,6 +25,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/ui/wizardstate"
 )
 
 // Collect prompts for each Field and writes answers into in.
@@ -47,6 +55,7 @@ func CollectWithReason(ctx context.Context, reason string, fields []registry.Fie
 	if fm.canceled {
 		return fmt.Errorf("canceled")
 	}
+	fm.state.ApplyToInput(in)
 	return nil
 }
 
@@ -54,20 +63,14 @@ type model struct {
 	ctx    context.Context
 	fields []registry.Field
 	in     registry.Input
-	idx    int
+	state  *wizardstate.State
 	reason string // optional header printed once above the first prompt
 
-	ti                textinput.Model
-	fp                *filepicker.Model // non-nil when current field is File
-	spin              spinner.Model
-	loading           bool
-	choices           []registry.Choice
-	selIdx            int          // cursor for selection list
-	multiSel          map[int]bool // checked choice indices for the current Multi field
-	committed         []string     // rendered lines for previously-answered fields
-	committedSections []string     // section name for each committed line (parallel)
-	committedIdx      []int        // field index for each committed line (for goBack)
-	termH             int          // terminal height for scroll capping
+	ti      textinput.Model
+	fp      *filepicker.Model // non-nil when current field is File
+	spin    spinner.Model
+	loading bool
+	termH   int // terminal height for scroll capping
 
 	err      error
 	canceled bool
@@ -77,15 +80,23 @@ func newModel(ctx context.Context, fields []registry.Field, in registry.Input) *
 	ti := textinput.New()
 	ti.Prompt = "› "
 	sp := spinner.New()
-	return &model{ctx: ctx, fields: fields, in: in, ti: ti, spin: sp}
+	return &model{
+		ctx:    ctx,
+		fields: fields,
+		in:     in,
+		state:  wizardstate.New(fields, in),
+		ti:     ti,
+		spin:   sp,
+	}
 }
 
 // curField returns the field we're currently collecting.
 func (m *model) curField() *registry.Field {
-	if m.idx >= len(m.fields) {
+	idx := m.state.Idx()
+	if idx >= len(m.fields) {
 		return nil
 	}
-	return &m.fields[m.idx]
+	return &m.fields[idx]
 }
 
 // isSelect returns true when the current field should be rendered as a list.
@@ -111,30 +122,21 @@ func (m *model) Init() tea.Cmd {
 }
 
 // startField focuses the input and, if Suggest is set, kicks off a loader.
+// State has already absorbed pre-seeded answers and skipped hidden
+// fields' visibility checks, so this loop only advances past
+// already-Committed entries (to preserve answers when the user
+// shift+tabs forward through them) or hidden ones.
 func (m *model) startField() tea.Cmd {
-	for m.idx < len(m.fields) {
-		f := &m.fields[m.idx]
-		// Skip fields whose When predicate returns false. Also clear
-		// any stale value so it doesn't leak into the saga.
-		if f.When != nil && !f.When(m.in) {
-			delete(m.in, f.Flag)
-			m.idx++
+	idx := m.state.Idx()
+	for idx < len(m.fields) {
+		if !m.state.FieldVisible(idx) {
+			idx++
+			m.state.Focus(idx)
 			continue
 		}
-		// If the field already has a value (from a prior pass before
-		// goBack), auto-recommit it and advance. This preserves
-		// downstream answers the user already gave.
-		if v, ok := m.in[f.Flag]; ok && v != "" {
-			labelText := f.DisplayLabel()
-			displayVal := v
-			if f.Sensitive {
-				displayVal = strings.Repeat("•", len(v))
-			}
-			m.committed = append(m.committed,
-				fmt.Sprintf("%s %s: %s", theme.OKMark, theme.Label.Render(labelText), displayVal))
-			m.committedSections = append(m.committedSections, f.Section)
-			m.committedIdx = append(m.committedIdx, m.idx)
-			m.idx++
+		if m.state.Entry(idx).Committed {
+			idx++
+			m.state.Focus(idx)
 			continue
 		}
 		break
@@ -145,15 +147,18 @@ func (m *model) startField() tea.Cmd {
 	}
 	m.ti.Reset()
 	m.fp = nil
-	m.selIdx = 0
-	m.multiSel = nil
-	m.choices = nil
-	m.err = nil
+	entry := m.state.Entry(idx)
 	if m.isSelect() {
-		// Selection mode: hide text input, fetch choices with spinner.
+		// Selection mode: hide text input, fetch choices unless we
+		// already have them (preserved across goBack).
 		m.ti.Blur()
-		m.loading = true
-		return m.fetchSuggest(*f)
+		if len(entry.Choices) == 0 {
+			m.loading = true
+			m.state.SetLoading(idx, true)
+			return m.fetchSuggest(*f)
+		}
+		m.loading = false
+		return nil
 	}
 	if m.isFile() {
 		// File picker mode.
@@ -162,6 +167,11 @@ func (m *model) startField() tea.Cmd {
 		fp.ShowHidden = false
 		fp.AutoHeight = false
 		fp.SetHeight(10)
+		// Restore the previously selected directory if the user is
+		// returning to this field via shift+tab.
+		if entry.FilePath != "" {
+			fp.Path = entry.FilePath
+		}
 		if cwd, err := os.Getwd(); err == nil {
 			fp.CurrentDirectory = cwd
 		}
@@ -170,20 +180,12 @@ func (m *model) startField() tea.Cmd {
 		m.loading = false
 		return fp.Init()
 	}
-	// Text input mode.
+	// Text input mode. State.Entry(idx).Text already carries either
+	// the user's previous answer (preserved across shift+tab) or the
+	// Input>Prefill>Default seed from state.New.
 	m.loading = false
 	m.ti.Placeholder = f.Help
-	// Seed with 3-tier precedence: Input > Prefill > Default.
-	// Matches the TUI wizard so both UIs behave identically.
-	var seed string
-	if v, ok := m.in[f.Flag]; ok && v != "" {
-		seed = v
-	} else if f.Prefill != nil {
-		seed = f.Prefill()
-	} else if f.Default != nil {
-		seed = fmt.Sprintf("%v", f.Default)
-	}
-	if seed != "" {
+	if seed := entry.Text; seed != "" {
 		m.ti.SetValue(seed)
 	}
 	if f.Sensitive {
@@ -201,7 +203,7 @@ type suggestMsg struct {
 }
 
 func (m *model) fetchSuggest(f registry.Field) tea.Cmd {
-	idx := m.idx
+	idx := m.state.Idx()
 	return func() tea.Msg {
 		cs, err := f.Suggest(m.ctx)
 		return suggestMsg{idx: idx, choices: cs, err: err}
@@ -210,57 +212,32 @@ func (m *model) fetchSuggest(f registry.Field) tea.Cmd {
 
 // commitAndAdvance records val for the current field and moves to the next.
 func (m *model) commitAndAdvance(val string) tea.Cmd {
+	idx := m.state.Idx()
 	f := m.curField()
 	if f == nil {
 		return tea.Quit
 	}
-	if err := f.ValidateValue(val); err != nil {
+	if err := m.state.CommitValue(idx, val); err != nil {
 		m.err = err
 		return nil
 	}
-	m.in[f.Flag] = val
-	labelText := f.DisplayLabel()
-	displayVal := val
-	if f.Sensitive {
-		displayVal = strings.Repeat("•", len(val))
+	m.err = nil
+	if next := m.state.NextVisible(idx); next >= 0 {
+		m.state.Focus(next)
+	} else {
+		m.state.Focus(len(m.fields))
 	}
-	m.committed = append(m.committed,
-		fmt.Sprintf("%s %s: %s", theme.OKMark, theme.Label.Render(labelText), displayVal))
-	m.committedSections = append(m.committedSections, f.Section)
-	// Track which field index produced each committed line so goBack
-	// can find the right field to return to.
-	m.committedIdx = append(m.committedIdx, m.idx)
-	m.idx++
 	return m.startField()
 }
 
-// goBack returns to the previous answered field. Removes committed
-// history from that point onward (startField will re-add still-valid
-// answers automatically) and clears only the target field's value so
-// the user can change it. Downstream answers are preserved unless
-// their When predicate becomes false after the change.
+// goBack returns to the previous answered field. State preserves the
+// target's Text / SelIdx / MultiSel / FilePath so the user can edit
+// their previous answer instead of retyping from default — the
+// shift+tab "fix my typo" flow.
 func (m *model) goBack() tea.Cmd {
-	if len(m.committedIdx) == 0 {
-		return nil // nothing to go back to
+	if m.state.GoBack(m.state.Idx()) < 0 {
+		return nil
 	}
-	// Find the field to return to.
-	prevIdx := m.committedIdx[len(m.committedIdx)-1]
-
-	// Truncate committed history to just before that field. Any
-	// entries after it will be re-added by startField if their
-	// values are still in m.in and their When still holds.
-	// Find how many committed entries to keep (all before prevIdx).
-	keepN := len(m.committedIdx) - 1
-	for keepN > 0 && m.committedIdx[keepN-1] >= prevIdx {
-		keepN--
-	}
-	m.committed = m.committed[:keepN]
-	m.committedSections = m.committedSections[:keepN]
-	m.committedIdx = m.committedIdx[:keepN]
-
-	// Clear only the target field so it gets re-prompted.
-	delete(m.in, m.fields[prevIdx].Flag)
-	m.idx = prevIdx
 	return m.startField()
 }
 
@@ -315,23 +292,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.loading {
 					return m, nil
 				}
-				// Commit the comma-joined list of checked choices in
-				// choice order. Empty selection is allowed only for
-				// non-required fields; required fields loop back and
-				// show the required error.
-				var picks []string
-				for idx, c := range m.choices {
-					if m.multiSel[idx] {
-						picks = append(picks, c.Value)
-					}
-				}
-				return m, m.commitAndAdvance(strings.Join(picks, ","))
+				idx := m.state.Idx()
+				val := m.state.Value(idx)
+				return m, m.commitAndAdvance(val)
 			}
 			if m.isSelect() {
-				if m.loading || len(m.choices) == 0 {
+				idx := m.state.Idx()
+				e := m.state.Entry(idx)
+				if m.loading || len(e.Choices) == 0 {
 					return m, nil
 				}
-				return m, m.commitAndAdvance(m.choices[m.selIdx].Value)
+				return m, m.commitAndAdvance(e.Choices[e.SelIdx].Value)
 			}
 			val := m.ti.Value()
 			if val == "" && m.curField().Required {
@@ -342,25 +313,30 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Space toggles the cursor row only for Multi fields.
 			// Regular Suggest fields ignore it (so a user who starts
 			// typing doesn't accidentally toggle a selection).
-			if m.isMulti() && !m.loading && len(m.choices) > 0 {
-				if m.multiSel == nil {
-					m.multiSel = map[int]bool{}
-				}
-				if m.multiSel[m.selIdx] {
-					delete(m.multiSel, m.selIdx)
-				} else {
-					m.multiSel[m.selIdx] = true
+			if m.isMulti() && !m.loading {
+				idx := m.state.Idx()
+				e := m.state.Entry(idx)
+				if len(e.Choices) > 0 {
+					m.state.ToggleMulti(idx, e.SelIdx)
 				}
 				return m, nil
 			}
 		case "up", "k":
-			if m.isSelect() && m.selIdx > 0 {
-				m.selIdx--
+			if m.isSelect() {
+				idx := m.state.Idx()
+				e := m.state.Entry(idx)
+				if e.SelIdx > 0 {
+					m.state.SetSelIdx(idx, e.SelIdx-1)
+				}
 				return m, nil
 			}
 		case "down", "j":
-			if m.isSelect() && m.selIdx < len(m.choices)-1 {
-				m.selIdx++
+			if m.isSelect() {
+				idx := m.state.Idx()
+				e := m.state.Entry(idx)
+				if e.SelIdx < len(e.Choices)-1 {
+					m.state.SetSelIdx(idx, e.SelIdx+1)
+				}
 				return m, nil
 			}
 		}
@@ -376,57 +352,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case suggestMsg:
-		if msg.idx != m.idx {
+		if msg.idx != m.state.Idx() {
 			return m, nil
 		}
 		m.loading = false
 		if msg.err != nil {
 			m.err = msg.err
+			m.state.SetChoicesErr(msg.idx, msg.err)
 			return m, nil
 		}
-		m.choices = msg.choices
-		// Seed cursor to the saved answer if the current field's
-		// Value matches one of the loaded choices. Matches the
-		// text-input seeding (Input > Prefill > Default) so a
-		// resumed wizard starts with the prior pick highlighted.
-		if f := m.curField(); f != nil {
-			want := m.in[f.Flag]
-			if want == "" && f.Prefill != nil {
-				want = f.Prefill()
-			}
-			if want == "" && f.Default != nil {
-				want = fmt.Sprintf("%v", f.Default)
-			}
-			if want != "" {
-				if m.isMulti() {
-					// Comma-split the seed and pre-check matching choices
-					// so a resumed wizard shows the previous picks.
-					set := map[string]bool{}
-					for _, v := range strings.Split(want, ",") {
-						v = strings.TrimSpace(v)
-						if v != "" {
-							set[v] = true
-						}
-					}
-					sel := map[int]bool{}
-					for i, c := range m.choices {
-						if set[c.Value] {
-							sel[i] = true
-						}
-					}
-					if len(sel) > 0 {
-						m.multiSel = sel
-					}
-				} else {
-					for i, c := range m.choices {
-						if c.Value == want {
-							m.selIdx = i
-							break
-						}
-					}
-				}
-			}
-		}
+		m.state.SetChoices(msg.idx, msg.choices)
 		return m, nil
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -439,6 +374,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if !m.isSelect() && !m.isFile() {
 		var cmd tea.Cmd
 		m.ti, cmd = m.ti.Update(msg)
+		// Mirror in-flight typing into State so When predicates see
+		// it (and so a goBack-then-forward roundtrip preserves the
+		// user's typing).
+		m.state.SetText(m.state.Idx(), m.ti.Value())
 		return m, cmd
 	}
 	return m, nil
@@ -457,20 +396,17 @@ func (m *model) View() tea.View {
 		s += "\n"
 	}
 	// Render committed history, inserting a section header whenever
-	// consecutive entries come from different sections. Entries with
-	// an empty section are treated as "no section" and don't print a
-	// header.
+	// consecutive entries come from different sections.
+	hist := m.state.CommittedHistory()
 	prevSection := ""
-	for i, c := range m.committed {
-		sec := ""
-		if i < len(m.committedSections) {
-			sec = m.committedSections[i]
+	for _, h := range hist {
+		if h.Section != "" && h.Section != prevSection {
+			s += renderSectionHeader(h.Section) + "\n"
 		}
-		if sec != "" && sec != prevSection {
-			s += renderSectionHeader(sec) + "\n"
-		}
-		prevSection = sec
-		s += c + "\n"
+		prevSection = h.Section
+		labelText := h.Field.DisplayLabel()
+		s += fmt.Sprintf("%s %s: %s\n",
+			theme.OKMark, theme.Label.Render(labelText), h.DisplayVal)
 	}
 	f := m.curField()
 	if f == nil {
@@ -485,7 +421,7 @@ func (m *model) View() tea.View {
 	// the current Input (e.g. a review-and-confirm summary).
 	preamble := f.Preamble
 	if f.PreambleFunc != nil {
-		preamble = f.PreambleFunc(m.in)
+		preamble = f.PreambleFunc(m.state.LiveInput())
 	}
 	if preamble != "" {
 		s += preamble
@@ -545,39 +481,44 @@ func (m *model) renderFile() string {
 }
 
 func (m *model) renderChoices() string {
-	if len(m.choices) == 0 {
+	idx := m.state.Idx()
+	entry := m.state.Entry(idx)
+	choices := entry.Choices
+	selIdx := entry.SelIdx
+	if len(choices) == 0 {
 		return theme.MutedText.Render("  (no options available)") + "\n"
 	}
 	multi := m.isMulti()
 	var s string
 	// Show column headers if the first choice has Help (used as header by SuggestFrom).
-	if m.choices[0].Help != "" {
+	if choices[0].Help != "" {
 		indent := "  "
 		if multi {
 			// Align header with the checkbox column below.
 			indent = "      "
 		}
-		s += indent + theme.Label.Render(m.choices[0].Help) + "\n"
+		s += indent + theme.Label.Render(choices[0].Help) + "\n"
 	}
 	// Cap visible choices to fit the terminal with a scroll window.
-	maxVisible := len(m.choices)
+	maxVisible := len(choices)
 	if m.termH > 0 {
 		// Reserve lines for: committed fields, label, header, hint, padding.
-		maxVisible = m.termH - len(m.committed) - 4
+		histLen := len(m.state.CommittedHistory())
+		maxVisible = m.termH - histLen - 4
 		if maxVisible < 5 {
 			maxVisible = 5
 		}
 	}
-	start, end := 0, len(m.choices)
-	if len(m.choices) > maxVisible {
+	start, end := 0, len(choices)
+	if len(choices) > maxVisible {
 		half := maxVisible / 2
-		start = m.selIdx - half
+		start = selIdx - half
 		if start < 0 {
 			start = 0
 		}
 		end = start + maxVisible
-		if end > len(m.choices) {
-			end = len(m.choices)
+		if end > len(choices) {
+			end = len(choices)
 			start = end - maxVisible
 		}
 	}
@@ -585,7 +526,7 @@ func (m *model) renderChoices() string {
 		s += theme.MutedText.Render(fmt.Sprintf("  ↑ %d more", start)) + "\n"
 	}
 	for i := start; i < end; i++ {
-		c := m.choices[i]
+		c := choices[i]
 		line := c.Display
 		if line == "" {
 			line = c.Value
@@ -596,27 +537,27 @@ func (m *model) renderChoices() string {
 		switch {
 		case multi:
 			box := "[ ]"
-			if m.multiSel[i] {
+			if entry.MultiSel[i] {
 				box = theme.Value.Render("[x]")
 			}
-			if i == m.selIdx {
+			if i == selIdx {
 				s += theme.Key.Render("▸") + " " + box + " " + theme.Value.Render(line) + "\n"
 			} else {
 				s += "  " + box + " " + line + "\n"
 			}
-		case i == m.selIdx:
+		case i == selIdx:
 			s += theme.Key.Render("▸") + " " + theme.Value.Render(line) + "\n"
 		default:
 			s += "  " + line + "\n"
 		}
 	}
-	if end < len(m.choices) {
-		s += theme.MutedText.Render(fmt.Sprintf("  ↓ %d more", len(m.choices)-end)) + "\n"
+	if end < len(choices) {
+		s += theme.MutedText.Render(fmt.Sprintf("  ↓ %d more", len(choices)-end)) + "\n"
 	}
 	var hint string
 	switch {
 	case multi:
-		n := len(m.multiSel)
+		n := len(entry.MultiSel)
 		hint = fmt.Sprintf("  %d selected · space toggle · ↑/↓ move · enter confirm · esc cancel", n)
 	default:
 		hint = "  ↑/↓ select · enter confirm · esc cancel"
