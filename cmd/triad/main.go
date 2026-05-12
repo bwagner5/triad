@@ -21,6 +21,7 @@ import (
 	"github.com/bwagner5/triad/pkg/resources/container"
 	"github.com/bwagner5/triad/pkg/ui/cli"
 	"github.com/bwagner5/triad/pkg/ui/tui"
+	"github.com/bwagner5/triad/pkg/ui/wizardstate"
 	"github.com/spf13/cobra"
 )
 
@@ -43,14 +44,22 @@ func Run(ctx context.Context, args []string, getenv func(string) string, stdout,
 	reg := registry.New()
 	reg.Register(container.Resource())
 
-	g := &cli.Globals{Getenv: getenv}
+	tuiOpts := tui.Options{Name: cliName, Version: "v" + strings.TrimPrefix(version, "v")}
+	g := &cli.Globals{
+		Getenv: getenv,
+		// Ctrl+T from the CLI wizard hands the partially-filled state
+		// off here; we relaunch as the full TUI with the wizard
+		// overlay pre-populated, and the saga runs inside the TUI.
+		SwitchToTUI: func(ctx context.Context, res *registry.Resource, op *registry.Operation, state *wizardstate.State) error {
+			return tui.RunWith(ctx, reg, tuiOpts, res, op, state)
+		},
+	}
 	root := cli.Build(cliName, "CLI scaffold with CLI + wizard + TUI", reg, g)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.SetArgs(args[1:])
 	root.Version = "v" + strings.TrimPrefix(version, "v")
 
-	tuiOpts := tui.Options{Name: cliName, Version: root.Version}
 	runTUI := func(cmd *cobra.Command, _ []string) error {
 		return tui.Run(cmd.Context(), reg, tuiOpts)
 	}

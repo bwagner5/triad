@@ -29,6 +29,7 @@ import (
 	"github.com/bwagner5/triad/pkg/trace"
 	"github.com/bwagner5/triad/pkg/ui/ascii"
 	"github.com/bwagner5/triad/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/ui/wizardstate"
 )
 
 func reflectIndirect(v any) reflect.Value                 { return reflect.Indirect(reflect.ValueOf(v)) }
@@ -64,6 +65,25 @@ func Run(ctx context.Context, reg *registry.Registry, opts Options) error {
 		"globalOps", len(opts.GlobalOps), "hasContext", opts.Context != nil,
 	)
 	m := newApp(ctx, reg, opts)
+	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
+	log.InfoContext(ctx, "tui exit", "err", err)
+	return err
+}
+
+// RunWith is like Run but starts with the wizard overlay already active,
+// pre-populated from a wizardstate.State that the inline CLI wizard
+// handed off via Ctrl+T. The TUI shows the form, and on submit runs
+// the saga (or Run op) inside the TUI.
+func RunWith(ctx context.Context, reg *registry.Registry, opts Options, res *registry.Resource, op *registry.Operation, state *wizardstate.State) error {
+	ctx = trace.WithUI(ctx, "tui")
+	log := trace.FromContext(ctx)
+	log.InfoContext(ctx, "tui start (handoff)",
+		"name", opts.Name, "op", op.Name,
+	)
+	m := newApp(ctx, reg, opts)
+	m.preloadResource = res
+	m.preloadOp = op
+	m.preloadState = state
 	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
 	log.InfoContext(ctx, "tui exit", "err", err)
 	return err
@@ -162,6 +182,13 @@ type app struct {
 	filtering  bool
 	filterText string
 	filterTI   textinput.Model
+
+	// Handoff preload from CLI wizard via Ctrl+T. When non-nil at
+	// Init time, the wizard overlay opens immediately seeded with
+	// the partial state, and on submit the corresponding op runs.
+	preloadResource *registry.Resource
+	preloadOp       *registry.Operation
+	preloadState    *wizardstate.State
 }
 
 func newApp(ctx context.Context, reg *registry.Registry, opts Options) *app {
@@ -232,7 +259,17 @@ type asyncFieldMsg struct {
 type sagaEventMsg runtime.Event
 
 func (a *app) Init() tea.Cmd {
-	return tea.Batch(a.refresh(), a.subscribeBus(), a.repaintTick(), a.spin.Tick, a.spinCategory.Tick)
+	cmds := []tea.Cmd{a.refresh(), a.subscribeBus(), a.repaintTick(), a.spin.Tick, a.spinCategory.Tick}
+	// Handoff path: if RunWith installed a preloaded wizard state,
+	// open the overlay immediately so the user lands in the same
+	// form they were filling out in the CLI.
+	if a.preloadState != nil && a.preloadOp != nil {
+		fields := a.preloadOp.Fields
+		input := a.preloadState.LiveInput()
+		cmds = append(cmds, a.wizard.ShowWithState(a.ctx, a.preloadResource, a.preloadOp, fields, input, a.preloadState, ""))
+		a.preloadState = nil
+	}
+	return tea.Batch(cmds...)
 }
 
 // repaintTick drives 1-second UI repaints so the refresh countdown updates.

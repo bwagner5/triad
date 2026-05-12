@@ -11,6 +11,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -24,6 +25,7 @@ import (
 	"github.com/bwagner5/triad/pkg/trace"
 	"github.com/bwagner5/triad/pkg/ui/theme"
 	"github.com/bwagner5/triad/pkg/ui/wizard"
+	"github.com/bwagner5/triad/pkg/ui/wizardstate"
 	"github.com/spf13/cobra"
 )
 
@@ -61,6 +63,13 @@ type Globals struct {
 	// pattern). Defaults to os.Getenv if nil. Set in tests to return a
 	// canned map so cases can run in parallel.
 	Getenv func(string) string
+	// SwitchToTUI, when non-nil, is invoked when the inline CLI wizard
+	// returns wizard.SwitchToTUI (the user pressed Ctrl+T to swap into
+	// the full TUI). The implementation typically calls into the tui
+	// package's RunWith entry point. When nil, Ctrl+T is treated as a
+	// regular cancel — wizard returns the SwitchToTUI error and the
+	// command surfaces it as an error to the user.
+	SwitchToTUI func(ctx context.Context, res *registry.Resource, op *registry.Operation, state *wizardstate.State) error
 	// cliName is the root command name; used to derive env-var fallbacks
 	// for every flag (e.g. LIGHTSAILCTL_REGION). Populated by Build().
 	cliName string
@@ -79,6 +88,23 @@ func (g *Globals) getenv(key string) string {
 // Interactive returns true when the CLI should prompt for missing inputs
 // and render a live saga view.
 func (g *Globals) Interactive() bool { return !g.NonInteractive }
+
+// handleSwitchToTUI checks whether err is a wizard.SwitchToTUI signal
+// and, if so, dispatches to g.SwitchToTUI. Returns (handled, error). If
+// the signal isn't present or no handler is configured, returns (false,
+// nil) and the caller should propagate the original error.
+func (g *Globals) handleSwitchToTUI(ctx context.Context, res *registry.Resource, op *registry.Operation, err error) (bool, error) {
+	var sw *wizard.SwitchToTUI
+	if !errors.As(err, &sw) {
+		return false, nil
+	}
+	if g.SwitchToTUI == nil {
+		// No handler wired; surface a helpful error rather than a
+		// confusing "switch to TUI" string.
+		return true, fmt.Errorf("ctrl+t is not configured for this CLI")
+	}
+	return true, g.SwitchToTUI(ctx, res, op, sw.State)
+}
 
 // Build constructs the cobra root for the given registry.
 func Build(rootUse, short string, reg *registry.Registry, g *Globals) *cobra.Command {
@@ -228,6 +254,9 @@ func sagaCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 				}
 			}
 			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
+				if handled, hErr := g.handleSwitchToTUI(cmd.Context(), &res, &op, err); handled {
+					return hErr
+				}
 				return err
 			}
 			return streamOp(cmd.Context(), cmd.OutOrStdout(), res, op, in, g.Interactive())
@@ -250,6 +279,9 @@ func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 				}
 			}
 			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
+				if handled, hErr := g.handleSwitchToTUI(cmd.Context(), nil, &op, err); handled {
+					return hErr
+				}
 				return err
 			}
 			// Run ops drive their own I/O (interactive subprocesses

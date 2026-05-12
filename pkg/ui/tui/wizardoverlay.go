@@ -60,6 +60,14 @@ func (wo *wizardOverlay) Show(ctx context.Context, res *registry.Resource, op *r
 }
 
 func (wo *wizardOverlay) ShowWithPreamble(ctx context.Context, res *registry.Resource, op *registry.Operation, fields []registry.Field, input registry.Input, preamble string) tea.Cmd {
+	return wo.ShowWithState(ctx, res, op, fields, input, nil, preamble)
+}
+
+// ShowWithState is like ShowWithPreamble but accepts a pre-built
+// wizardstate.State to resume from (e.g. after a Ctrl+T handoff from
+// the inline CLI wizard). When state is nil, a fresh state is built
+// from fields and input.
+func (wo *wizardOverlay) ShowWithState(ctx context.Context, res *registry.Resource, op *registry.Operation, fields []registry.Field, input registry.Input, state *wizardstate.State, preamble string) tea.Cmd {
 	wo.active = true
 	wo.busy = false
 	wo.ctx = ctx
@@ -67,7 +75,11 @@ func (wo *wizardOverlay) ShowWithPreamble(ctx context.Context, res *registry.Res
 	wo.op = op
 	wo.fields = fields
 	wo.input = input
-	wo.state = wizardstate.New(fields, input)
+	if state != nil {
+		wo.state = state
+	} else {
+		wo.state = wizardstate.New(fields, input)
+	}
 	wo.preamble = preamble
 	wo.preambleScroll = 0
 
@@ -107,6 +119,11 @@ func (wo *wizardOverlay) ShowWithPreamble(ctx context.Context, res *registry.Res
 		wo.inputs[i] = ti
 
 		if f.Suggest != nil {
+			// Resume path: state may already carry fetched choices
+			// from a prior CLI-side Suggest call. Don't re-fetch.
+			if len(wo.state.Entry(i).Choices) > 0 {
+				continue
+			}
 			wo.state.SetLoading(i, true)
 			cmds = append(cmds, wo.fetchSuggest(i, f))
 		}

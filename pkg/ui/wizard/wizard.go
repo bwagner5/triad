@@ -28,6 +28,18 @@ import (
 	"github.com/bwagner5/triad/pkg/ui/wizardstate"
 )
 
+// SwitchToTUI is returned by Collect / CollectWithReason when the user
+// pressed Ctrl+T to swap from the inline CLI wizard into the full TUI.
+// It carries the in-flight wizardstate.State so the TUI can resume
+// without re-prompting for already-answered fields. Callers detect it
+// with errors.As and dispatch to a TUI-side entry point that accepts a
+// preloaded state.
+type SwitchToTUI struct {
+	State *wizardstate.State
+}
+
+func (e *SwitchToTUI) Error() string { return "switch to TUI" }
+
 // Collect prompts for each Field and writes answers into in.
 // Runs inline (no alt-screen) so output blends with the surrounding CLI.
 func Collect(ctx context.Context, fields []registry.Field, in registry.Input) error {
@@ -52,6 +64,9 @@ func CollectWithReason(ctx context.Context, reason string, fields []registry.Fie
 	if fm.err != nil {
 		return fm.err
 	}
+	if fm.switchTUI {
+		return &SwitchToTUI{State: fm.state}
+	}
 	if fm.canceled {
 		return fmt.Errorf("canceled")
 	}
@@ -72,8 +87,9 @@ type model struct {
 	loading bool
 	termH   int // terminal height for scroll capping
 
-	err      error
-	canceled bool
+	err       error
+	canceled  bool
+	switchTUI bool // user pressed Ctrl+T to swap to the full TUI
 }
 
 func newModel(ctx context.Context, fields []registry.Field, in registry.Input) *model {
@@ -260,6 +276,15 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			m.canceled = true
+			return m, tea.Quit
+		case "ctrl+t":
+			// Swap to the full-screen TUI, preserving all collected
+			// answers so far. Mirror any in-flight typing into State
+			// before quitting so the TUI sees what the user typed.
+			if !m.isSelect() && !m.isFile() {
+				m.state.SetText(m.state.Idx(), m.ti.Value())
+			}
+			m.switchTUI = true
 			return m, tea.Quit
 		case "shift+tab":
 			return m, m.goBack()

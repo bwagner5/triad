@@ -67,6 +67,27 @@ func TestShiftTabPreservesTypedValue(t *testing.T) {
 	}
 }
 
+// TestCtrlTSetsSwitchToTUIFlag asserts that Ctrl+T pressed during the
+// CLI wizard sets the switchTUI flag and quits, so Collect can return
+// SwitchToTUI to the caller for a TUI handoff.
+func TestCtrlTSetsSwitchToTUIFlag(t *testing.T) {
+	fields := []registry.Field{{Flag: "a"}}
+	m := newModel(context.Background(), fields, registry.Input{})
+	_ = m.Init()
+	for _, r := range "partial" {
+		m.Update(tea.KeyPressMsg{Code: r, Text: string(r)})
+	}
+	m.Update(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
+	if !m.switchTUI {
+		t.Fatal("Ctrl+T should set switchTUI=true")
+	}
+	// State should have captured the in-flight typing so the TUI can
+	// resume with the partial value visible.
+	if got := m.state.Entry(0).Text; got != "partial" {
+		t.Errorf("state.Entry(0).Text = %q; want partial (in-flight typing should be mirrored on Ctrl+T)", got)
+	}
+}
+
 // TestShiftTabPreservesDownstreamAnswer asserts that going back does
 // not wipe a downstream answer the user already typed — so they can
 // fix a typo upstream and continue without re-entering everything.
