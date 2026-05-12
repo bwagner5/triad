@@ -477,6 +477,7 @@ func (m *model) View() tea.View {
 	if m.err != nil {
 		s += theme.Err.Render("  "+m.err.Error()) + "\n"
 	}
+	s += theme.MutedText.Render("  shift+tab back · ctrl+t open in TUI · esc cancel") + "\n"
 	return tea.NewView(s)
 }
 
