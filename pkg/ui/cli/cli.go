@@ -89,21 +89,62 @@ func (g *Globals) getenv(key string) string {
 // and render a live saga view.
 func (g *Globals) Interactive() bool { return !g.NonInteractive }
 
-// handleSwitchToTUI checks whether err is a wizard.SwitchToTUI signal
-// and, if so, dispatches to g.SwitchToTUI. Returns (handled, error). If
-// the signal isn't present or no handler is configured, returns (false,
-// nil) and the caller should propagate the original error.
-func (g *Globals) handleSwitchToTUI(ctx context.Context, res *registry.Resource, op *registry.Operation, err error) (bool, error) {
+// handoffOutcome reports what happened when the user pressed Ctrl+T
+// from the inline CLI wizard.
+type handoffOutcome int
+
+const (
+	// handoffNotTriggered means the error was not a SwitchToTUI; the
+	// caller should propagate it.
+	handoffNotTriggered handoffOutcome = iota
+	// handoffCompletedInTUI means the operation finished inside the TUI
+	// (the saga or Run op already executed there). The caller should
+	// return nil and skip its own streamOp / op.Run path.
+	handoffCompletedInTUI
+	// handoffResumedInCLI means the user toggled back to the CLI wizard
+	// and finished there. The Input map is now populated; the caller
+	// should fall through to its normal post-CompleteInput path
+	// (streamOp / op.Run) using the same Input.
+	handoffResumedInCLI
+)
+
+// handleSwitchToTUI dispatches the SwitchToTUI sentinel returned by
+// the inline wizard, looping while the user toggles between CLI and
+// TUI. Returns (outcome, error):
+//
+//   - handoffNotTriggered: err wasn't SwitchToTUI; propagate err.
+//   - handoffCompletedInTUI: TUI ran the op end-to-end; return nil.
+//   - handoffResumedInCLI: wizard.Resume succeeded; in is populated;
+//     run the op inline.
+//   - any outcome with err != nil: surface that error.
+func (g *Globals) handleSwitchToTUI(ctx context.Context, res *registry.Resource, op *registry.Operation, in registry.Input, err error) (handoffOutcome, error) {
 	var sw *wizard.SwitchToTUI
 	if !errors.As(err, &sw) {
-		return false, nil
+		return handoffNotTriggered, nil
 	}
 	if g.SwitchToTUI == nil {
-		// No handler wired; surface a helpful error rather than a
-		// confusing "switch to TUI" string.
-		return true, fmt.Errorf("ctrl+t is not configured for this CLI")
+		return handoffCompletedInTUI, fmt.Errorf("ctrl+t is not configured for this CLI")
 	}
-	return true, g.SwitchToTUI(ctx, res, op, sw.State)
+	state := sw.State
+	for {
+		tuiErr := g.SwitchToTUI(ctx, res, op, state)
+		var back *wizard.BackToCLI
+		if !errors.As(tuiErr, &back) {
+			// TUI finished (or returned a real error).
+			return handoffCompletedInTUI, tuiErr
+		}
+		// User asked to come back to the CLI wizard.
+		state = back.State
+		resumeErr := wizard.Resume(ctx, state, in)
+		if resumeErr == nil {
+			return handoffResumedInCLI, nil
+		}
+		var sw2 *wizard.SwitchToTUI
+		if !errors.As(resumeErr, &sw2) {
+			return handoffResumedInCLI, resumeErr
+		}
+		state = sw2.State
+	}
 }
 
 // Build constructs the cobra root for the given registry.
@@ -254,10 +295,19 @@ func sagaCmd(res registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 				}
 			}
 			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
-				if handled, hErr := g.handleSwitchToTUI(cmd.Context(), &res, &op, err); handled {
+				outcome, hErr := g.handleSwitchToTUI(cmd.Context(), &res, &op, in, err)
+				switch outcome {
+				case handoffCompletedInTUI:
 					return hErr
+				case handoffResumedInCLI:
+					if hErr != nil {
+						return hErr
+					}
+					// Fall through: run the saga inline with the
+					// answers the wizard collected on resume.
+				default:
+					return err
 				}
-				return err
 			}
 			return streamOp(cmd.Context(), cmd.OutOrStdout(), res, op, in, g.Interactive())
 		},
@@ -279,10 +329,19 @@ func actionCmd(_ registry.Resource, op registry.Operation, g *Globals) *cobra.Co
 				}
 			}
 			if err := CompleteInput(cmd.Context(), op.Fields, in, g.Interactive(), g.Prompter); err != nil {
-				if handled, hErr := g.handleSwitchToTUI(cmd.Context(), nil, &op, err); handled {
+				outcome, hErr := g.handleSwitchToTUI(cmd.Context(), nil, &op, in, err)
+				switch outcome {
+				case handoffCompletedInTUI:
 					return hErr
+				case handoffResumedInCLI:
+					if hErr != nil {
+						return hErr
+					}
+					// Fall through: run the action inline with the
+					// answers the wizard collected on resume.
+				default:
+					return err
 				}
-				return err
 			}
 			// Run ops drive their own I/O (interactive subprocesses
 			// like ssh / logs, API-backed commands that Fprintln to

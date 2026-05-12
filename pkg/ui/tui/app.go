@@ -29,6 +29,7 @@ import (
 	"github.com/bwagner5/triad/pkg/trace"
 	"github.com/bwagner5/triad/pkg/ui/ascii"
 	"github.com/bwagner5/triad/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/ui/wizard"
 	"github.com/bwagner5/triad/pkg/ui/wizardstate"
 )
 
@@ -74,6 +75,11 @@ func Run(ctx context.Context, reg *registry.Registry, opts Options) error {
 // pre-populated from a wizardstate.State that the inline CLI wizard
 // handed off via Ctrl+T. The TUI shows the form, and on submit runs
 // the saga (or Run op) inside the TUI.
+//
+// If the user presses the back-binding (Ctrl+T again) while still
+// inside the same handoff-originated session, RunWith returns a
+// *wizard.BackToCLI error carrying the State so the caller can
+// resume the inline CLI wizard exactly where the user left off.
 func RunWith(ctx context.Context, reg *registry.Registry, opts Options, res *registry.Resource, op *registry.Operation, state *wizardstate.State) error {
 	ctx = trace.WithUI(ctx, "tui")
 	log := trace.FromContext(ctx)
@@ -84,9 +90,16 @@ func RunWith(ctx context.Context, reg *registry.Registry, opts Options, res *reg
 	m.preloadResource = res
 	m.preloadOp = op
 	m.preloadState = state
-	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
+	m.handoffOrigin = true
+	final, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
 	log.InfoContext(ctx, "tui exit", "err", err)
-	return err
+	if err != nil {
+		return err
+	}
+	if fa, ok := final.(*app); ok && fa.backToCLI {
+		return &wizard.BackToCLI{State: state}
+	}
+	return nil
 }
 
 // ---- Model ----
@@ -189,6 +202,19 @@ type app struct {
 	preloadResource *registry.Resource
 	preloadOp       *registry.Operation
 	preloadState    *wizardstate.State
+	// handoffOrigin is true when the TUI was launched via RunWith
+	// (i.e. the user came from the inline CLI wizard via Ctrl+T).
+	// Drives the "back to CLI" keybinding which is hidden otherwise.
+	handoffOrigin bool
+	// pendingCursorPK, when non-empty, asks handleItems to position
+	// the row cursor on the row whose primary key matches. Used by
+	// the row-action handoff path to land on the row the user had
+	// selected in the CLI Suggest list.
+	pendingCursorPK string
+	// backToCLI is set when the user presses the back-binding from a
+	// CLI-originated TUI session. RunWith reads it after .Run()
+	// returns and surfaces wizard.BackToCLI to the caller.
+	backToCLI bool
 }
 
 func newApp(ctx context.Context, reg *registry.Registry, opts Options) *app {
@@ -259,22 +285,47 @@ type asyncFieldMsg struct {
 type sagaEventMsg runtime.Event
 
 func (a *app) Init() tea.Cmd {
-	cmds := []tea.Cmd{a.refresh(), a.subscribeBus(), a.repaintTick(), a.spin.Tick, a.spinCategory.Tick}
 	// Handoff path: if RunWith installed a preloaded wizard state,
-	// open the overlay immediately so the user lands in the same
-	// form they were filling out in the CLI. Use the State's own
-	// field slice (the *missing* fields the wizard was prompting),
-	// not op.Fields — they may differ in length (CompleteInput
-	// filters out fields already populated via flags / config /
-	// Pre hooks before the wizard runs), and a mismatch panics in
-	// State.Entry on overlay render.
+	// branch on whether the operation is a row-action (delete,
+	// restart, exec — anything that selects an existing row).
+	//
+	//   - Row-action ops: skip the overlay and drop the user on the
+	//     list view for the resource, with the cursor on the row
+	//     whose primary key matches their CLI-side Suggest pick.
+	//     The expected next step is for them to press the op's key
+	//     binding (e.g. 'd' for delete) on the chosen row.
+	//   - Other ops (e.g. app deploy): show the overlay seeded from
+	//     State so they can finish the form here.
+	//
+	// Use State.Fields() (the *missing* fields the wizard was
+	// prompting), not op.Fields — they differ in length when
+	// CompleteInput filtered some out via flags / config / Pre.
 	if a.preloadState != nil && a.preloadOp != nil {
+		if a.preloadResource != nil && needsSelection(*a.preloadResource, *a.preloadOp) {
+			// Row-action handoff: land on list view.
+			a.resource = a.preloadResource
+			a.mode = modeList
+			a.cursor = 0
+			pk := ""
+			if pkField := primaryKeyField(a.preloadResource); pkField != nil {
+				pk = a.preloadState.LiveInput().Get(pkField.Flag)
+			}
+			a.pendingCursorPK = pk
+			cmds := []tea.Cmd{a.refresh(), a.subscribeBus(), a.repaintTick(), a.spin.Tick, a.spinCategory.Tick}
+			a.preloadState = nil
+			return tea.Batch(cmds...)
+		}
+		// Form-style handoff: show overlay.
 		fields := a.preloadState.Fields()
 		input := a.preloadState.LiveInput()
-		cmds = append(cmds, a.wizard.ShowWithState(a.ctx, a.preloadResource, a.preloadOp, fields, input, a.preloadState, ""))
+		cmds := []tea.Cmd{
+			a.refresh(), a.subscribeBus(), a.repaintTick(), a.spin.Tick, a.spinCategory.Tick,
+			a.wizard.ShowWithState(a.ctx, a.preloadResource, a.preloadOp, fields, input, a.preloadState, ""),
+		}
 		a.preloadState = nil
+		return tea.Batch(cmds...)
 	}
-	return tea.Batch(cmds...)
+	return tea.Batch(a.refresh(), a.subscribeBus(), a.repaintTick(), a.spin.Tick, a.spinCategory.Tick)
 }
 
 // repaintTick drives 1-second UI repaints so the refresh countdown updates.
@@ -344,6 +395,7 @@ func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 		if a.cursor >= len(a.items) {
 			a.cursor = 0
 		}
+		a.applyPendingCursor()
 		a.lastRefresh = time.Now()
 		a.nextRefresh = a.lastRefresh.Add(a.sched.Interval(a.resource.Name))
 		return a, tea.Batch(append(a.scheduleAsyncLoads(), a.scheduleRefresh())...)
@@ -385,6 +437,7 @@ func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 		a.items = a.items[:0]
 		a.seenGen = msg.gen
 	}
+	a.applyPendingCursor()
 	if msg.final {
 		a.refreshing = false
 		a.initialLoad = false
@@ -396,6 +449,29 @@ func (a *app) handleItems(msg itemsMsg) (tea.Model, tea.Cmd) {
 		return a, a.readStream(msg.resource, msg.next, msg.gen)
 	}
 	return a, nil
+}
+
+// applyPendingCursor positions the row cursor on the row whose primary
+// key matches a.pendingCursorPK and clears the pending field. No-op
+// when no pending PK is set or when the matching row hasn't arrived
+// yet (the next batch will retry). Used by the row-action handoff
+// path to land on the row the user picked in the CLI Suggest list.
+func (a *app) applyPendingCursor() {
+	if a.pendingCursorPK == "" || a.resource == nil || len(a.items) == 0 {
+		return
+	}
+	pk := primaryKeyField(a.resource)
+	if pk == nil {
+		a.pendingCursorPK = ""
+		return
+	}
+	for i, it := range a.items {
+		if readField(reflectIndirect(it), *pk) == a.pendingCursorPK {
+			a.cursor = i
+			a.pendingCursorPK = ""
+			return
+		}
+	}
 }
 
 // scheduleAsyncLoads returns a batch of tea.Cmds — one per (row, async
@@ -658,6 +734,16 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
+
+	// Ctrl+T toggles back to the inline CLI wizard, but only when the
+	// session originated from a CLI handoff. Otherwise the user has
+	// no CLI context to return to and the binding does nothing.
+	// Intercepted before any overlay so it works from the wizard
+	// overlay AND from the list view the row-action handoff lands on.
+	if key == "ctrl+t" && a.handoffOrigin {
+		a.backToCLI = true
+		return a, tea.Quit
+	}
 
 	// Review overlay (scrollable policy viewer) takes top priority.
 	if a.review.Active() {

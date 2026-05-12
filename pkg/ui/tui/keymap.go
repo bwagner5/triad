@@ -194,6 +194,22 @@ func (a *app) keyMap() []binding {
 			return a, tea.Quit
 		}},
 	)
+	// Back-to-CLI is offered only when the TUI was launched via a CLI
+	// handoff (Ctrl+T from the inline wizard). Otherwise the binding
+	// has nowhere to return to and would be confusing.
+	//
+	// Note: dispatch is a no-op for ctrl+t because handleKey already
+	// intercepts it at the top — but the entry is still rendered in
+	// the "?" help overlay so users discover the toggle.
+	if a.handoffOrigin {
+		bs = append(bs, binding{
+			Key: "ctrl+t", Label: "back to CLI", Cat: "Global",
+			Run: func(a *app) (tea.Model, tea.Cmd) {
+				a.backToCLI = true
+				return a, tea.Quit
+			},
+		})
+	}
 	return bs
 }
 

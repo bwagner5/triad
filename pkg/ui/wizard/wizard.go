@@ -40,6 +40,46 @@ type SwitchToTUI struct {
 
 func (e *SwitchToTUI) Error() string { return "switch to TUI" }
 
+// BackToCLI is returned by tui.RunWith when the user pressed Ctrl+T
+// inside a TUI session that originated from a CLI handoff, asking to
+// resume the inline CLI wizard. Carries the same State so the caller
+// can re-enter the wizard with the user's existing answers, cursors,
+// and pre-fetched choices intact.
+type BackToCLI struct {
+	State *wizardstate.State
+}
+
+func (e *BackToCLI) Error() string { return "back to CLI" }
+
+// Resume re-enters the inline CLI wizard with an existing State (e.g.
+// after the user pressed Ctrl+T from a TUI session that originated
+// here). On success, the answers are written into in. Returns
+// SwitchToTUI again if the user toggles back to the TUI, the same way
+// Collect does on a fresh call.
+func Resume(ctx context.Context, state *wizardstate.State, in registry.Input) error {
+	if state == nil || state.Len() == 0 {
+		return nil
+	}
+	m := newModelFromState(ctx, state, in)
+	p := tea.NewProgram(m, tea.WithContext(ctx))
+	finalModel, err := p.Run()
+	if err != nil {
+		return err
+	}
+	fm := finalModel.(*model)
+	if fm.err != nil {
+		return fm.err
+	}
+	if fm.switchTUI {
+		return &SwitchToTUI{State: fm.state}
+	}
+	if fm.canceled {
+		return fmt.Errorf("canceled")
+	}
+	fm.state.ApplyToInput(in)
+	return nil
+}
+
 // Collect prompts for each Field and writes answers into in.
 // Runs inline (no alt-screen) so output blends with the surrounding CLI.
 func Collect(ctx context.Context, fields []registry.Field, in registry.Input) error {
@@ -101,6 +141,24 @@ func newModel(ctx context.Context, fields []registry.Field, in registry.Input) *
 		fields: fields,
 		in:     in,
 		state:  wizardstate.New(fields, in),
+		ti:     ti,
+		spin:   sp,
+	}
+}
+
+// newModelFromState wires a fresh bubbletea model around an existing
+// State (e.g. one returned to us from a TUI handoff). The caller's
+// answers, cursor positions, multi-select set, and pre-fetched Suggest
+// choices are all preserved.
+func newModelFromState(ctx context.Context, state *wizardstate.State, in registry.Input) *model {
+	ti := textinput.New()
+	ti.Prompt = "› "
+	sp := spinner.New()
+	return &model{
+		ctx:    ctx,
+		fields: state.Fields(),
+		in:     in,
+		state:  state,
 		ti:     ti,
 		spin:   sp,
 	}
