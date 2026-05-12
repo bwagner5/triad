@@ -128,11 +128,15 @@ func (wo *wizardOverlay) ShowWithState(ctx context.Context, res *registry.Resour
 			cmds = append(cmds, wo.fetchSuggest(i, f))
 		}
 	}
-	cmds = append(cmds, wo.focusField(0), wo.spin.Tick)
-	// If the first field is hidden by its When predicate, hop to
-	// the first visible one. Evaluated after all inputs have been
-	// seeded so When predicates reading seeded defaults see them.
-	if !wo.state.FieldVisible(0) {
+	// Resume path (Ctrl+T handoff): focus the field the user was on
+	// in the CLI wizard. Fresh path: start at field 0. In both cases,
+	// fall back to FirstVisible if the chosen index is hidden.
+	target := 0
+	if state != nil {
+		target = state.Idx()
+	}
+	cmds = append(cmds, wo.focusField(target), wo.spin.Tick)
+	if !wo.state.FieldVisible(target) {
 		if j := wo.state.FirstVisible(); j >= 0 {
 			cmds = append(cmds, wo.focusField(j))
 		}
