@@ -686,6 +686,10 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, a.refresh()
 	case dismissSagaMsg:
+		// The saga channel closed — all buffered events have been
+		// drained. Nil the reference regardless of minimize state so
+		// the channel can be GC'd.
+		a.sagaCh = nil
 		// Auto-dismiss only fires when the user is looking at the
 		// expanded overlay. If they minimized to the pill, leave the
 		// DONE/ERROR badge in place until they manually dismiss it —
@@ -695,7 +699,6 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.saga.Clear()
-		a.sagaCh = nil
 	case detailFetchedMsg:
 		if msg.item != nil && a.mode == modeDetail {
 			a.detailItem = msg.item
@@ -1015,23 +1018,28 @@ func (a *app) handleSagaEvent(ev runtime.Event) (tea.Model, tea.Cmd) {
 	a.saga.Push(ev)
 	if ev.Done {
 		a.sched.Bump(ev.Resource)
-		a.sagaCh = nil
 		var toastCmd tea.Cmd
 		if ev.Err != nil {
 			toastCmd = a.showToast(toastErr, fmt.Sprintf("%s failed: %s", ev.Saga, ev.Err.Error()))
 		} else {
 			toastCmd = a.showToast(toastOK, fmt.Sprintf("%s succeeded", ev.Saga))
 		}
-		cmds := []tea.Cmd{a.saga.DismissAfter(), a.refresh(), a.subscribeBus(), toastCmd}
-		// When the saga ran from the detail view, re-fetch the
-		// currently-selected item so the pane reflects any state it
-		// just mutated (e.g. deploy updates last-deploy + container
-		// status). The list refresh() above only repopulates the
-		// table; a.detailItem is populated via a separate Get.
+		cmds := []tea.Cmd{a.saga.DismissAfter(), a.refresh(), toastCmd}
 		if a.mode == modeDetail {
 			if cmd := a.fetchDetail(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
+		}
+		// Keep draining the saga channel if the Done arrived via the
+		// bus (which fires before the channel's Done). Remaining step
+		// events buffered in the channel still need to be delivered so
+		// the overlay reflects their final status. Only nil sagaCh
+		// when the channel itself is exhausted (readSagaCmd returns
+		// dismissSagaMsg on close).
+		if a.sagaCh != nil {
+			cmds = append(cmds, readSagaCmd(a.sagaCh))
+		} else {
+			cmds = append(cmds, a.subscribeBus())
 		}
 		return a, tea.Batch(cmds...)
 	}

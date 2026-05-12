@@ -60,6 +60,24 @@ func Resume(ctx context.Context, state *wizardstate.State, in registry.Input) er
 	if state == nil || state.Len() == 0 {
 		return nil
 	}
+	// Auto-commit visible fields that already have valid values (e.g.
+	// answered in the TUI before flipping back). Without this, the CLI
+	// wizard's committed-history recap would skip fields the user
+	// already filled in the TUI because they were never individually
+	// committed there (the TUI commits everything at submit time).
+	for i := 0; i < state.Len(); i++ {
+		if state.Entry(i).Committed {
+			continue
+		}
+		if !state.FieldVisible(i) {
+			continue
+		}
+		if v := state.Value(i); v != "" {
+			if err := state.Field(i).ValidateValue(v); err == nil {
+				_ = state.Commit(i)
+			}
+		}
+	}
 	m := newModelFromState(ctx, state, in)
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 	finalModel, err := p.Run()

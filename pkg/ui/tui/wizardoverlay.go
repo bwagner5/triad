@@ -98,6 +98,12 @@ func (wo *wizardOverlay) ShowWithState(ctx context.Context, res *registry.Resour
 			if cwd, err := os.Getwd(); err == nil {
 				fp.CurrentDirectory = cwd
 			}
+			// Restore a previously selected path from the state (e.g.
+			// Ctrl+T handoff from the CLI wizard where the user already
+			// picked a file).
+			if path := wo.state.Entry(i).FilePath; path != "" {
+				fp.Path = path
+			}
 			wo.pickers[i] = &fp
 			cmds = append(cmds, fp.Init())
 			continue
