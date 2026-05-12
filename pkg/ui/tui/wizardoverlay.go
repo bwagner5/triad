@@ -13,10 +13,16 @@ import (
 	"github.com/bwagner5/triad/pkg/registry"
 	"github.com/bwagner5/triad/pkg/trace"
 	"github.com/bwagner5/triad/pkg/ui/theme"
+	"github.com/bwagner5/triad/pkg/ui/wizardstate"
 )
 
 // wizardOverlay is a form overlay that shows all fields at once.
 // The focused field is editable; tab/shift-tab moves between fields.
+//
+// Per-field state (answers, choice cursors, multi-select checkboxes,
+// loaded Suggest choices, validation errors) lives in wo.state — a
+// wizardstate.State that the inline CLI wizard also uses, so the two
+// UIs share semantics for visibility cascades, GoBack, and submit.
 type wizardOverlay struct {
 	active   bool
 	ctx      context.Context
@@ -24,20 +30,15 @@ type wizardOverlay struct {
 	op       *registry.Operation
 	fields   []registry.Field
 	input    registry.Input
-	idx      int // focused field
+	state    *wizardstate.State
 
-	inputs  []textinput.Model   // one per field
-	pickers []*filepicker.Model // one per file-field, nil otherwise
-	spin    spinner.Model
-	loading []bool              // per-field loading state
-	choices [][]registry.Choice // per-field choices
-	selIdx  []int               // per-field selection cursor
-	// multiSel tracks selected choice indices for Multi fields.
-	// nil for non-Multi fields. Mutations go through toggleMulti
-	// so fieldValue can commit a stable, sorted, comma-joined result.
-	multiSel []map[int]bool
+	// Widget instances. State holds the answer slots; widgets render
+	// the focused entry. inputs[i].Value() is mirrored into State on
+	// every keystroke so When predicates see in-flight text.
+	inputs  []textinput.Model
+	pickers []*filepicker.Model
 
-	errs []string // per-field validation error
+	spin spinner.Model
 	// busy is true after submit() while we wait for the saga or next
 	// wizard to advance. Renders a spinner+message instead of dismissing
 	// the overlay, so users get continuous feedback.
@@ -66,18 +67,13 @@ func (wo *wizardOverlay) ShowWithPreamble(ctx context.Context, res *registry.Res
 	wo.op = op
 	wo.fields = fields
 	wo.input = input
-	wo.idx = 0
+	wo.state = wizardstate.New(fields, input)
 	wo.preamble = preamble
 	wo.preambleScroll = 0
 
 	n := len(fields)
 	wo.inputs = make([]textinput.Model, n)
 	wo.pickers = make([]*filepicker.Model, n)
-	wo.loading = make([]bool, n)
-	wo.choices = make([][]registry.Choice, n)
-	wo.selIdx = make([]int, n)
-	wo.multiSel = make([]map[int]bool, n)
-	wo.errs = make([]string, n)
 
 	var cmds []tea.Cmd
 	for i, f := range fields {
@@ -100,30 +96,18 @@ func (wo *wizardOverlay) ShowWithPreamble(ctx context.Context, res *registry.Res
 		if f.Sensitive {
 			ti.EchoMode = textinput.EchoPassword
 		}
-		// Seed text inputs with precedence: Input value > lazy Prefill >
-		// static Default. Ensures the wizard reflects what'll actually
-		// run — the user sees 'dev' for an env field with Default='dev'
-		// regardless of whether they reached the wizard via CLI flags
-		// (bindFields already populated Input) or TUI key binding (Input
-		// empty; Default wasn't applied). Suggest fields read from
-		// choices, not text input, so skip them.
+		// State already seeded entry.Text from Input>Prefill>Default.
+		// Suggest fields render via choices, not the textinput, so
+		// skip the SetValue call for them.
 		if f.Suggest == nil {
-			var seed string
-			if v, ok := input[f.Flag]; ok && v != "" {
-				seed = v
-			} else if f.Prefill != nil {
-				seed = f.Prefill()
-			} else if f.Default != nil {
-				seed = fmt.Sprintf("%v", f.Default)
-			}
-			if seed != "" {
+			if seed := wo.state.Entry(i).Text; seed != "" {
 				ti.SetValue(seed)
 			}
 		}
 		wo.inputs[i] = ti
 
 		if f.Suggest != nil {
-			wo.loading[i] = true
+			wo.state.SetLoading(i, true)
 			cmds = append(cmds, wo.fetchSuggest(i, f))
 		}
 	}
@@ -131,8 +115,8 @@ func (wo *wizardOverlay) ShowWithPreamble(ctx context.Context, res *registry.Res
 	// If the first field is hidden by its When predicate, hop to
 	// the first visible one. Evaluated after all inputs have been
 	// seeded so When predicates reading seeded defaults see them.
-	if !wo.fieldVisible(0) {
-		if j := wo.firstVisible(); j >= 0 {
+	if !wo.state.FieldVisible(0) {
+		if j := wo.state.FirstVisible(); j >= 0 {
 			cmds = append(cmds, wo.focusField(j))
 		}
 	}
@@ -145,11 +129,18 @@ func (wo *wizardOverlay) Clear() {
 	wo.fields = nil
 	wo.inputs = nil
 	wo.pickers = nil
-	wo.choices = nil
-	wo.multiSel = nil
-	wo.errs = nil
+	wo.state = nil
 	wo.preamble = ""
 	wo.preambleScroll = 0
+}
+
+// idx returns the currently focused field index. Convenience for
+// migrated call sites that previously used wo.idx.
+func (wo *wizardOverlay) idx() int {
+	if wo.state == nil {
+		return 0
+	}
+	return wo.state.Idx()
 }
 
 func (wo *wizardOverlay) isSelect(i int) bool {
@@ -161,25 +152,64 @@ func (wo *wizardOverlay) isMulti(i int) bool {
 	return wo.isSelect(i) && wo.fields[i].Multi
 }
 
-// toggleMulti flips the selected state of choice `choiceIdx` for field i.
-// Allocates the set on first use so fieldValue can distinguish "never
-// touched" from "explicitly empty".
-func (wo *wizardOverlay) toggleMulti(i, choiceIdx int) {
-	if i >= len(wo.multiSel) {
-		return
-	}
-	if wo.multiSel[i] == nil {
-		wo.multiSel[i] = map[int]bool{}
-	}
-	if wo.multiSel[i][choiceIdx] {
-		delete(wo.multiSel[i], choiceIdx)
-	} else {
-		wo.multiSel[i][choiceIdx] = true
-	}
-}
-
 func (wo *wizardOverlay) isFile(i int) bool {
 	return i < len(wo.fields) && (wo.fields[i].File || wo.fields[i].EffectiveKind() == registry.KindFile)
+}
+
+// fieldVisible reports whether field i should be shown in the overlay.
+// Thin pass-through to State.
+func (wo *wizardOverlay) fieldVisible(i int) bool {
+	if wo.state == nil {
+		return false
+	}
+	return wo.state.FieldVisible(i)
+}
+
+func (wo *wizardOverlay) nextVisible(i int) int {
+	if wo.state == nil {
+		return -1
+	}
+	return wo.state.NextVisible(i)
+}
+
+func (wo *wizardOverlay) prevVisible(i int) int {
+	if wo.state == nil {
+		return -1
+	}
+	return wo.state.PrevVisible(i)
+}
+
+func (wo *wizardOverlay) firstVisible() int {
+	if wo.state == nil {
+		return -1
+	}
+	return wo.state.FirstVisible()
+}
+
+func (wo *wizardOverlay) lastVisible() int {
+	if wo.state == nil {
+		return -1
+	}
+	return wo.state.LastVisible()
+}
+
+// fieldValue returns the value the user has selected/typed for field i.
+// Thin pass-through to State; preserved as a method so existing callers
+// (and tests) keep their call sites.
+func (wo *wizardOverlay) fieldValue(i int) string {
+	if wo.state == nil {
+		return ""
+	}
+	// For File fields, the picker's Path is the source of truth — sync
+	// it into State before reading so we don't lag the widget.
+	if wo.isFile(i) && wo.pickers[i] != nil {
+		wo.state.SetFilePath(i, wo.pickers[i].Path)
+	}
+	// For text fields, the textinput is the source of truth — same.
+	if !wo.isSelect(i) && !wo.isFile(i) && i < len(wo.inputs) {
+		wo.state.SetText(i, wo.inputs[i].Value())
+	}
+	return wo.state.Value(i)
 }
 
 type wizardSuggestMsg struct {
@@ -197,18 +227,21 @@ func (wo *wizardOverlay) fetchSuggest(idx int, f registry.Field) tea.Cmd {
 }
 
 func (wo *wizardOverlay) focusField(i int) tea.Cmd {
-	// Commit the departing field's value into wo.input so that
-	// liveInputForWhen (which only reads the focused Suggest field's
-	// cursor) still sees the answer after focus moves away. Without
-	// this, navigating away from create-new-instance=true would
-	// cause __ni/* fields to vanish because the unfocused Suggest
-	// value is excluded from When evaluation.
-	if wo.idx >= 0 && wo.idx < len(wo.fields) {
-		if v := wo.fieldValue(wo.idx); v != "" {
-			wo.input[wo.fields[wo.idx].Flag] = v
+	// Mirror the departing field's widget value into State so When
+	// predicates see the latest typed/picked value when we re-evaluate
+	// visibility for downstream fields.
+	if wo.state != nil {
+		cur := wo.state.Idx()
+		if cur >= 0 && cur < len(wo.fields) {
+			if !wo.isSelect(cur) && !wo.isFile(cur) && cur < len(wo.inputs) {
+				wo.state.SetText(cur, wo.inputs[cur].Value())
+			}
+			if wo.isFile(cur) && wo.pickers[cur] != nil {
+				wo.state.SetFilePath(cur, wo.pickers[cur].Path)
+			}
 		}
+		wo.state.Focus(i)
 	}
-	wo.idx = i
 	var cmds []tea.Cmd
 	for j := range wo.inputs {
 		if j == i && !wo.isSelect(j) && !wo.isFile(j) {
@@ -220,169 +253,20 @@ func (wo *wizardOverlay) focusField(i int) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// liveInput returns a snapshot of the overlay's answers so far: the
-// caller-supplied Input, overlaid with each field's current widget
-// value. Used by submit() to commit final values.
-func (wo *wizardOverlay) liveInput() registry.Input {
-	out := registry.Input{}
-	for k, v := range wo.input {
-		out[k] = v
-	}
-	for i, f := range wo.fields {
-		if v := wo.fieldValue(i); v != "" {
-			out[f.Flag] = v
-		}
-	}
-	return out
-}
-
-// liveInputForWhen builds the input snapshot used to evaluate When
-// predicates for field excludeIdx. Rules:
-//
-//  1. Field excludeIdx's own value is always excluded (both from
-//     wo.input and widget state) — a field must not hide itself.
-//  2. Suggest fields only contribute their cursor value when they
-//     appear BEFORE excludeIdx in field order. This mirrors the CLI
-//     wizard's sequential model: earlier answers drive later fields'
-//     visibility, but a later field's uncommitted cursor can't hide
-//     an earlier one (which would block shift+tab navigation).
-//  3. Text inputs and file pickers always contribute.
-//  4. Committed values in wo.input (from conf, flags, Pre hooks, or
-//     prior focusField commits) contribute for all fields except
-//     excludeIdx.
-func (wo *wizardOverlay) liveInputForWhen(excludeIdx int) registry.Input {
-	out := registry.Input{}
-	excludeFlag := ""
-	if excludeIdx >= 0 && excludeIdx < len(wo.fields) {
-		excludeFlag = wo.fields[excludeIdx].Flag
-	}
-	for k, v := range wo.input {
-		if k == excludeFlag {
-			continue
-		}
-		out[k] = v
-	}
-	for i, f := range wo.fields {
-		if i == excludeIdx {
-			continue
-		}
-		// Suggest fields: only include if they precede the field
-		// being evaluated (sequential "already answered" model).
-		if wo.isSelect(i) && i >= excludeIdx {
-			continue
-		}
-		if v := wo.fieldValue(i); v != "" {
-			out[f.Flag] = v
-		}
-	}
-	return out
-}
-
-// fieldVisible reports whether field i should be shown in the overlay.
-// A field is hidden when its When predicate returns false against the
-// live input. No predicate means always visible.
-//
-// Uses liveInputForWhen which excludes field i's own widget value and
-// only includes the focused Suggest field's cursor — unfocused Suggest
-// fields with loaded but uncommitted choices don't pollute evaluation.
-func (wo *wizardOverlay) fieldVisible(i int) bool {
-	if i < 0 || i >= len(wo.fields) {
-		return false
-	}
-	f := wo.fields[i]
-	if f.When == nil {
-		return true
-	}
-	return f.When(wo.liveInputForWhen(i))
-}
-
-// nextVisible returns the index of the first visible field strictly
-// after i, or -1 if none. firstVisible returns the first visible
-// field in the overlay (or -1 if all are hidden, which shouldn't
-// happen in practice).
-func (wo *wizardOverlay) nextVisible(i int) int {
-	for j := i + 1; j < len(wo.fields); j++ {
-		if wo.fieldVisible(j) {
-			return j
-		}
-	}
-	return -1
-}
-
-func (wo *wizardOverlay) prevVisible(i int) int {
-	for j := i - 1; j >= 0; j-- {
-		if wo.fieldVisible(j) {
-			return j
-		}
-	}
-	return -1
-}
-
-func (wo *wizardOverlay) firstVisible() int {
-	for j := 0; j < len(wo.fields); j++ {
-		if wo.fieldVisible(j) {
-			return j
-		}
-	}
-	return -1
-}
-
-func (wo *wizardOverlay) lastVisible() int {
-	for j := len(wo.fields) - 1; j >= 0; j-- {
-		if wo.fieldVisible(j) {
-			return j
-		}
-	}
-	return -1
-}
-
 func (wo *wizardOverlay) submit() tea.Cmd {
-	// Validate visible fields only. Hidden fields (When→false) are
-	// conceptually absent — don't enforce their Required, don't
-	// validate stale widget state, and don't carry their values
-	// forward into Input. This mirrors wizard.Collect's
-	// startField() behavior so both UIs agree on what "present"
-	// means.
-	valid := true
-	for i, f := range wo.fields {
-		wo.errs[i] = ""
-		if !wo.fieldVisible(i) {
-			continue
-		}
-		val := wo.fieldValue(i)
-		if f.Required && val == "" {
-			wo.errs[i] = "required"
-			valid = false
-		} else if val != "" {
-			if err := f.ValidateValue(val); err != nil {
-				wo.errs[i] = err.Error()
-				valid = false
-			}
+	// Mirror text/file widgets into State once before validation so any
+	// in-flight typing is included.
+	for i := range wo.fields {
+		if wo.isFile(i) && wo.pickers[i] != nil {
+			wo.state.SetFilePath(i, wo.pickers[i].Path)
+		} else if !wo.isSelect(i) && i < len(wo.inputs) && wo.inputs[i].Prompt != "" {
+			wo.state.SetText(i, wo.inputs[i].Value())
 		}
 	}
-	if !valid {
-		// Focus first visible field with error.
-		for i, e := range wo.errs {
-			if e != "" && wo.fieldVisible(i) {
-				return wo.focusField(i)
-			}
-		}
-		return nil
+	if first := wo.state.Submit(); first >= 0 {
+		return wo.focusField(first)
 	}
-	for i, f := range wo.fields {
-		if wo.fieldVisible(i) {
-			wo.input[f.Flag] = wo.fieldValue(i)
-		} else {
-			// Defensive: if the predicate flipped after seeding
-			// we might have a stale value in Input. Drop it so
-			// downstream saga steps don't see "ghost" answers
-			// (e.g. __ni/region when the user chose existing).
-			delete(wo.input, f.Flag)
-		}
-	}
-	// Keep the overlay active showing a "working" spinner so the user
-	// gets continuous visual feedback instead of a flash-then-next-screen.
-	// The next Show() / Clear() supersedes this.
+	wo.state.ApplyToInput(wo.input)
 	wo.busy = true
 	return func() tea.Msg {
 		return wizardDoneMsg{resource: wo.resource, op: wo.op, input: wo.input}
@@ -407,32 +291,6 @@ func (wo *wizardOverlay) validateField(i int) error {
 }
 
 var errRequired = fmt.Errorf("required")
-
-func (wo *wizardOverlay) fieldValue(i int) string {
-	if wo.isMulti(i) {
-		if i >= len(wo.multiSel) || len(wo.multiSel[i]) == 0 {
-			return ""
-		}
-		// Emit in choice order (not selection order) for stable output.
-		var picks []string
-		for idx, c := range wo.choices[i] {
-			if wo.multiSel[i][idx] {
-				picks = append(picks, c.Value)
-			}
-		}
-		return strings.Join(picks, ",")
-	}
-	if wo.isSelect(i) {
-		if len(wo.choices[i]) > 0 && wo.selIdx[i] < len(wo.choices[i]) {
-			return wo.choices[i][wo.selIdx[i]].Value
-		}
-		return ""
-	}
-	if wo.isFile(i) && wo.pickers[i] != nil {
-		return wo.pickers[i].Path
-	}
-	return wo.inputs[i].Value()
-}
 
 // wizardDoneMsg is posted when the wizard overlay finishes collecting all fields.
 type wizardDoneMsg struct {
@@ -484,23 +342,25 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 			}
 		}
 	}
+	cur := wo.idx()
 	// If the focused field is a filepicker, let it handle keystrokes.
 	// handleKey below still intercepts tab/shift-tab/enter at submit time.
-	if wo.isFile(wo.idx) && wo.pickers[wo.idx] != nil {
+	if wo.isFile(cur) && wo.pickers[cur] != nil {
 		if key, ok := msg.(tea.KeyPressMsg); ok {
 			if consumed, cmd := wo.fileKey(key); consumed {
 				return true, cmd
 			}
 		}
-		fp := *wo.pickers[wo.idx]
+		fp := *wo.pickers[cur]
 		newFp, cmd := fp.Update(msg)
-		wo.pickers[wo.idx] = &newFp
+		wo.pickers[cur] = &newFp
 		if didSelect, path := newFp.DidSelectFile(msg); didSelect {
-			wo.pickers[wo.idx].Path = path
+			wo.pickers[cur].Path = path
+			wo.state.SetFilePath(cur, path)
 			// File selected: advance to next visible field if there
 			// is one, else submit. Prevents accidental submit when
 			// the user expects enter to just commit the file.
-			if j := wo.nextVisible(wo.idx); j >= 0 {
+			if j := wo.nextVisible(cur); j >= 0 {
 				return true, tea.Batch(cmd, wo.focusField(j))
 			}
 			return true, tea.Batch(cmd, wo.submit())
@@ -512,57 +372,10 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 		return true, wo.handleKey(msg)
 	case wizardSuggestMsg:
 		if msg.idx < len(wo.fields) {
-			wo.loading[msg.idx] = false
 			if msg.err != nil {
-				wo.errs[msg.idx] = msg.err.Error()
+				wo.state.SetChoicesErr(msg.idx, msg.err)
 			} else {
-				wo.choices[msg.idx] = msg.choices
-				// Seed cursor to the saved/prefilled/default answer
-				// when one of the returned choices matches. Mirrors
-				// the text-input seeding (Input > Prefill > Default)
-				// so confirmation prompts can default to "Yes" and
-				// users who already stated intent don't have to
-				// arrow-down before pressing enter.
-				f := wo.fields[msg.idx]
-				var want string
-				if v, ok := wo.input[f.Flag]; ok && v != "" {
-					want = v
-				} else if f.Prefill != nil {
-					want = f.Prefill()
-				} else if f.Default != nil {
-					want = fmt.Sprintf("%v", f.Default)
-				}
-				if want != "" {
-					if wo.isMulti(msg.idx) {
-						// Multi seeding: every matching value becomes a
-						// pre-checked row. Parsing here (instead of via
-						// Input.Multi) keeps this package free of import
-						// cycles on the commasplit helper.
-						set := map[string]bool{}
-						for _, v := range strings.Split(want, ",") {
-							v = strings.TrimSpace(v)
-							if v != "" {
-								set[v] = true
-							}
-						}
-						sel := map[int]bool{}
-						for i, c := range msg.choices {
-							if set[c.Value] {
-								sel[i] = true
-							}
-						}
-						if len(sel) > 0 {
-							wo.multiSel[msg.idx] = sel
-						}
-					} else {
-						for i, c := range msg.choices {
-							if c.Value == want {
-								wo.selIdx[msg.idx] = i
-								break
-							}
-						}
-					}
-				}
+				wo.state.SetChoices(msg.idx, msg.choices)
 			}
 		}
 		return true, nil
@@ -571,10 +384,12 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 		wo.spin, cmd = wo.spin.Update(msg)
 		return true, cmd
 	}
-	// Forward to focused text input.
-	if wo.idx < len(wo.inputs) && !wo.isSelect(wo.idx) && !wo.isFile(wo.idx) {
+	// Forward to focused text input, then mirror into State so When
+	// predicates see in-flight typing.
+	if cur < len(wo.inputs) && !wo.isSelect(cur) && !wo.isFile(cur) {
 		var cmd tea.Cmd
-		wo.inputs[wo.idx], cmd = wo.inputs[wo.idx].Update(msg)
+		wo.inputs[cur], cmd = wo.inputs[cur].Update(msg)
+		wo.state.SetText(cur, wo.inputs[cur].Value())
 		return true, cmd
 	}
 	return true, nil
@@ -584,18 +399,19 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 // is focused (tab/shift-tab/esc, and enter-to-submit once a file has
 // been selected). Returns consumed=true when we handled it.
 func (wo *wizardOverlay) fileKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
+	cur := wo.idx()
 	switch msg.String() {
 	case "ctrl+c":
 		op, res := wo.op, wo.resource
 		wo.Clear()
 		return true, func() tea.Msg { return wizardDoneMsg{resource: res, op: op, input: nil} }
 	case "tab":
-		if j := wo.nextVisible(wo.idx); j >= 0 {
+		if j := wo.nextVisible(cur); j >= 0 {
 			return true, wo.focusField(j)
 		}
 		return true, nil
 	case "shift+tab":
-		if j := wo.prevVisible(wo.idx); j >= 0 {
+		if j := wo.prevVisible(cur); j >= 0 {
 			return true, wo.focusField(j)
 		}
 		return true, nil
@@ -604,8 +420,8 @@ func (wo *wizardOverlay) fileKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 		// OR select a file. Only one of those is "commit the field".
 		// If the picker already has a Path committed, advance to next
 		// visible field (or submit when on the last visible field).
-		if wo.pickers[wo.idx] != nil && wo.pickers[wo.idx].Path != "" {
-			if j := wo.nextVisible(wo.idx); j >= 0 {
+		if wo.pickers[cur] != nil && wo.pickers[cur].Path != "" {
+			if j := wo.nextVisible(cur); j >= 0 {
 				return true, wo.focusField(j)
 			}
 			return true, wo.submit()
@@ -617,10 +433,11 @@ func (wo *wizardOverlay) fileKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 
 func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	key := msg.String()
+	cur := wo.idx()
+	e := wo.state.Entry(cur)
 	trace.Trace(wo.ctx, "tui wizard key",
-		"key", key, "idx", wo.idx, "isSelect", wo.isSelect(wo.idx),
-		"loading", wo.idx < len(wo.loading) && wo.loading[wo.idx],
-		"choices", len(wo.choices[wo.idx]), "selIdx", wo.selIdx[wo.idx],
+		"key", key, "idx", cur, "isSelect", wo.isSelect(cur),
+		"loading", e.Loading, "choices", len(e.Choices), "selIdx", e.SelIdx,
 	)
 	switch key {
 	case "ctrl+c", "esc":
@@ -643,12 +460,12 @@ func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	case "tab":
-		if j := wo.nextVisible(wo.idx); j >= 0 {
+		if j := wo.nextVisible(cur); j >= 0 {
 			return wo.focusField(j)
 		}
 		return nil
 	case "shift+tab":
-		if j := wo.prevVisible(wo.idx); j >= 0 {
+		if j := wo.prevVisible(cur); j >= 0 {
 			return wo.focusField(j)
 		}
 		return nil
@@ -658,14 +475,14 @@ func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 		// visible field submits. For select fields, enter on the
 		// last visible field also submits; on non-last, it commits
 		// the selection and advances.
-		if j := wo.nextVisible(wo.idx); j >= 0 {
+		if j := wo.nextVisible(cur); j >= 0 {
 			// Run field-level validation before advancing so the
 			// user doesn't tab past a bad value unknowingly.
-			if err := wo.validateField(wo.idx); err != nil {
-				wo.errs[wo.idx] = err.Error()
+			if err := wo.validateField(cur); err != nil {
+				wo.state.Entry(cur).Err = err.Error()
 				return nil
 			}
-			wo.errs[wo.idx] = ""
+			wo.state.Entry(cur).Err = ""
 			return wo.focusField(j)
 		}
 		return wo.submit()
@@ -673,24 +490,24 @@ func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	// Selection list navigation for Suggest fields.
 	// up/down/j/k all move the list cursor. If the current field is a text
 	// input, up/down act as tab/shift-tab (field nav).
-	if wo.isSelect(wo.idx) && !wo.loading[wo.idx] {
+	if wo.isSelect(cur) && !e.Loading {
 		switch key {
 		case "j", "down":
-			if wo.selIdx[wo.idx] < len(wo.choices[wo.idx])-1 {
-				wo.selIdx[wo.idx]++
+			if e.SelIdx < len(e.Choices)-1 {
+				wo.state.SetSelIdx(cur, e.SelIdx+1)
 			}
 			return nil
 		case "k", "up":
-			if wo.selIdx[wo.idx] > 0 {
-				wo.selIdx[wo.idx]--
+			if e.SelIdx > 0 {
+				wo.state.SetSelIdx(cur, e.SelIdx-1)
 			}
 			return nil
 		case " ", "space":
 			// Space toggles selection only for Multi fields.
 			// Regular Suggest fields ignore it so typing into a
 			// would-be text input isn't mistaken for selection.
-			if wo.isMulti(wo.idx) && len(wo.choices[wo.idx]) > 0 {
-				wo.toggleMulti(wo.idx, wo.selIdx[wo.idx])
+			if wo.isMulti(cur) && len(e.Choices) > 0 {
+				wo.state.ToggleMulti(cur, e.SelIdx)
 			}
 			return nil
 		case "pgup", "pgdown":
@@ -702,20 +519,21 @@ func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	// Text input field: up/down navigate between visible fields.
 	switch key {
 	case "down":
-		if j := wo.nextVisible(wo.idx); j >= 0 {
+		if j := wo.nextVisible(cur); j >= 0 {
 			return wo.focusField(j)
 		}
 		return nil
 	case "up":
-		if j := wo.prevVisible(wo.idx); j >= 0 {
+		if j := wo.prevVisible(cur); j >= 0 {
 			return wo.focusField(j)
 		}
 		return nil
 	}
-	// Forward to text input.
-	if wo.idx < len(wo.inputs) {
+	// Forward to text input, mirroring back into State.
+	if cur < len(wo.inputs) {
 		var cmd tea.Cmd
-		wo.inputs[wo.idx], cmd = wo.inputs[wo.idx].Update(msg)
+		wo.inputs[cur], cmd = wo.inputs[cur].Update(msg)
+		wo.state.SetText(cur, wo.inputs[cur].Value())
 		return cmd
 	}
 	return nil
@@ -807,6 +625,7 @@ func (wo *wizardOverlay) Box(w, h int) string {
 	// Find the last visible field so we only add spacer newlines
 	// between visible rows (not between the last and a run of
 	// hidden ones).
+	cur := wo.idx()
 	lastVisible := wo.lastVisible()
 
 	for i, f := range wo.fields {
@@ -814,7 +633,7 @@ func (wo *wizardOverlay) Box(w, h int) string {
 		if !wo.fieldVisible(i) {
 			continue
 		}
-		focused := i == wo.idx
+		focused := i == cur
 		// DisplayLabel strips internal prefixes (e.g. "__ni/name"
 		// renders as "Instance name") so sub-saga namespacing
 		// doesn't leak into the TUI.
@@ -829,14 +648,13 @@ func (wo *wizardOverlay) Box(w, h int) string {
 			label += theme.Err.Render(" *")
 		}
 
+		entry := wo.state.Entry(i)
+
 		// Unfocused fields collapse to label + current value (one line).
 		if !focused {
 			val := wo.fieldValue(i)
 			if wo.isMulti(i) {
-				n := 0
-				if i < len(wo.multiSel) {
-					n = len(wo.multiSel[i])
-				}
+				n := len(entry.MultiSel)
 				switch n {
 				case 0:
 					val = theme.MutedText.Render("(none selected)")
@@ -848,8 +666,8 @@ func (wo *wizardOverlay) Box(w, h int) string {
 				val = theme.MutedText.Render("—")
 			}
 			body.WriteString("  " + label + "  " + val + "\n")
-			if wo.errs[i] != "" {
-				body.WriteString("  " + theme.Err.Render(wo.errs[i]) + "\n")
+			if entry.Err != "" {
+				body.WriteString("  " + theme.Err.Render(entry.Err) + "\n")
 			}
 			continue
 		}
@@ -863,7 +681,7 @@ func (wo *wizardOverlay) Box(w, h int) string {
 		}
 
 		switch {
-		case wo.isSelect(i) && wo.loading[i]:
+		case wo.isSelect(i) && entry.Loading:
 			body.WriteString("  " + wo.spin.View() + " " + theme.MutedText.Render("loading…") + "\n")
 		case wo.isSelect(i):
 			body.WriteString(wo.renderChoices(i, focused, maxChoices))
@@ -873,8 +691,8 @@ func (wo *wizardOverlay) Box(w, h int) string {
 			body.WriteString("  " + wo.inputs[i].View() + "\n")
 		}
 
-		if wo.errs[i] != "" {
-			body.WriteString("  " + theme.Err.Render(wo.errs[i]) + "\n")
+		if entry.Err != "" {
+			body.WriteString("  " + theme.Err.Render(entry.Err) + "\n")
 		}
 		if i < lastVisible {
 			body.WriteString("\n")
@@ -882,7 +700,7 @@ func (wo *wizardOverlay) Box(w, h int) string {
 	}
 
 	hint := "tab/shift+tab · enter: next (or submit on last field) · esc cancel"
-	if wo.isMulti(wo.idx) {
+	if wo.isMulti(cur) {
 		hint = "space toggle · ↑/↓ move · enter: next (or submit on last field) · esc cancel"
 	}
 	body.WriteString("\n" + theme.MutedText.Render("  "+hint))
@@ -924,11 +742,12 @@ func (wo *wizardOverlay) renderFile(fieldIdx int, focused bool) string {
 }
 
 func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool, maxVisible int) string {
-	cs := wo.choices[fieldIdx]
+	entry := wo.state.Entry(fieldIdx)
+	cs := entry.Choices
 	if len(cs) == 0 {
 		return "  " + theme.MutedText.Render("(no options)") + "\n"
 	}
-	sel := wo.selIdx[fieldIdx]
+	sel := entry.SelIdx
 	multi := wo.isMulti(fieldIdx)
 
 	// Compute scroll window around the selected item.
@@ -972,7 +791,7 @@ func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool, maxVisible in
 		// "▸ " highlight for the cursor row.
 		if multi {
 			box := "[ ]"
-			if wo.multiSel[fieldIdx][i] {
+			if entry.MultiSel[i] {
 				box = theme.Value.Render("[x]")
 			}
 			if i == sel && focused {
@@ -999,7 +818,7 @@ func (wo *wizardOverlay) renderChoices(fieldIdx int, focused bool, maxVisible in
 	// Footer hint tailored to multi vs single. Rendered only for the
 	// focused field so unfocused collapsed rows stay compact.
 	if focused && multi {
-		n := len(wo.multiSel[fieldIdx])
+		n := len(entry.MultiSel)
 		s.WriteString("  " + theme.MutedText.Render(fmt.Sprintf("%d selected · space toggle · enter confirm", n)) + "\n")
 	}
 	return s.String()

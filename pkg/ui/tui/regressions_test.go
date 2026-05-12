@@ -102,7 +102,7 @@ func TestWizardOverlaySuggestSeeding_Default(t *testing.T) {
 	choices, _ := fields[0].Suggest(context.Background())
 	wo.Update(wizardSuggestMsg{idx: 0, choices: choices})
 
-	if got := wo.selIdx[0]; got != 1 {
+	if got := wo.state.Entry(0).SelIdx; got != 1 {
 		t.Errorf("selIdx = %d; want 1 (cursor on 'true' via Default)", got)
 	}
 }
@@ -122,7 +122,7 @@ func TestWizardOverlaySuggestSeeding_Precedence(t *testing.T) {
 	_ = wo.Show(context.Background(), nil, &registry.Operation{Name: "test"}, fields, registry.Input{"pick": "c"})
 	choices, _ := fields[0].Suggest(context.Background())
 	wo.Update(wizardSuggestMsg{idx: 0, choices: choices})
-	if got := wo.selIdx[0]; got != 2 {
+	if got := wo.state.Entry(0).SelIdx; got != 2 {
 		t.Errorf("Input precedence: selIdx = %d; want 2", got)
 	}
 
@@ -130,7 +130,7 @@ func TestWizardOverlaySuggestSeeding_Precedence(t *testing.T) {
 	wo2 := newWizardOverlay()
 	_ = wo2.Show(context.Background(), nil, &registry.Operation{Name: "test"}, fields, registry.Input{})
 	wo2.Update(wizardSuggestMsg{idx: 0, choices: choices})
-	if got := wo2.selIdx[0]; got != 1 {
+	if got := wo2.state.Entry(0).SelIdx; got != 1 {
 		t.Errorf("Prefill precedence: selIdx = %d; want 1", got)
 	}
 }
@@ -148,7 +148,7 @@ func TestWizardOverlaySuggestSeeding_NoDefaultStaysAtZero(t *testing.T) {
 	_ = wo.Show(context.Background(), nil, &registry.Operation{Name: "test"}, fields, registry.Input{})
 	choices, _ := fields[0].Suggest(context.Background())
 	wo.Update(wizardSuggestMsg{idx: 0, choices: choices})
-	if got := wo.selIdx[0]; got != 0 {
+	if got := wo.state.Entry(0).SelIdx; got != 0 {
 		t.Errorf("selIdx = %d; want 0 (no seed → first choice)", got)
 	}
 }
@@ -415,8 +415,8 @@ func TestWizardOverlayDeployFirstTime(t *testing.T) {
 	wo.Update(wizardSuggestMsg{idx: 2, choices: choices})
 
 	// After choices load, selIdx[2] should be 0 (first choice = "false")
-	if wo.selIdx[2] != 0 {
-		t.Errorf("selIdx[2] = %d; want 0", wo.selIdx[2])
+	if got := wo.state.Entry(2).SelIdx; got != 0 {
+		t.Errorf("selIdx[2] = %d; want 0", got)
 	}
 	if v := wo.fieldValue(2); v != "false" {
 		t.Errorf("fieldValue(2) = %q; want 'false'", v)
@@ -443,8 +443,8 @@ func TestWizardOverlayDeployFirstTime(t *testing.T) {
 	}
 
 	// Now simulate user selecting "Yes" (create new instance)
-	wo.focusField(2) // user tabs to the Target field
-	wo.selIdx[2] = 1 // move cursor to "true"
+	wo.focusField(2)        // user tabs to the Target field
+	wo.state.SetSelIdx(2, 1) // move cursor to "true"
 	if v := wo.fieldValue(2); v != "true" {
 		t.Errorf("after cursor move, fieldValue(2) = %q; want 'true'", v)
 	}
@@ -516,8 +516,8 @@ func TestWizardOverlayAppCreateWithNewInstance(t *testing.T) {
 	}
 
 	// Switch to "Yes" (index 1) — instance picker hidden, __ni/* visible
-	wo.focusField(2) // user tabs to the Target field
-	wo.selIdx[2] = 1
+	wo.focusField(2)        // user tabs to the Target field
+	wo.state.SetSelIdx(2, 1)
 	out = wo.Box(120, 40)
 	if strings.Contains(out, "Lightsail instance") {
 		t.Errorf("instance picker should be hidden when create-new-instance=true:\n%s", out)
@@ -665,7 +665,8 @@ func TestWizardOverlayMultiSelectSeedsFromInput(t *testing.T) {
 	if got := wo.fieldValue(0); got != "alpha,charlie" {
 		t.Errorf("seeded fieldValue = %q; want alpha,charlie", got)
 	}
-	if !wo.multiSel[0][0] || wo.multiSel[0][1] || !wo.multiSel[0][2] {
-		t.Errorf("multiSel = %v; want {0:true, 2:true}", wo.multiSel[0])
+	got := wo.state.Entry(0).MultiSel
+	if !got[0] || got[1] || !got[2] {
+		t.Errorf("multiSel = %v; want {0:true, 2:true}", got)
 	}
 }
