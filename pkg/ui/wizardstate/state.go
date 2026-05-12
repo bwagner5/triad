@@ -138,6 +138,13 @@ func sprintAny(v any) string {
 // Field returns the registry.Field at idx. Panics on out-of-range.
 func (s *State) Field(idx int) registry.Field { return s.fields[idx] }
 
+// Fields returns the field slice the State was built for. The returned
+// slice is the same one passed to New — callers that need to feed it
+// to a sibling UI (e.g. the TUI overlay during a Ctrl+T handoff) get
+// guaranteed alignment with State's entries without having to track
+// the slice separately.
+func (s *State) Fields() []registry.Field { return s.fields }
+
 // Len returns the number of fields.
 func (s *State) Len() int { return len(s.fields) }
 

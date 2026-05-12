@@ -262,9 +262,14 @@ func (a *app) Init() tea.Cmd {
 	cmds := []tea.Cmd{a.refresh(), a.subscribeBus(), a.repaintTick(), a.spin.Tick, a.spinCategory.Tick}
 	// Handoff path: if RunWith installed a preloaded wizard state,
 	// open the overlay immediately so the user lands in the same
-	// form they were filling out in the CLI.
+	// form they were filling out in the CLI. Use the State's own
+	// field slice (the *missing* fields the wizard was prompting),
+	// not op.Fields — they may differ in length (CompleteInput
+	// filters out fields already populated via flags / config /
+	// Pre hooks before the wizard runs), and a mismatch panics in
+	// State.Entry on overlay render.
 	if a.preloadState != nil && a.preloadOp != nil {
-		fields := a.preloadOp.Fields
+		fields := a.preloadState.Fields()
 		input := a.preloadState.LiveInput()
 		cmds = append(cmds, a.wizard.ShowWithState(a.ctx, a.preloadResource, a.preloadOp, fields, input, a.preloadState, ""))
 		a.preloadState = nil
