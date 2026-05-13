@@ -65,8 +65,19 @@ func Resume(ctx context.Context, state *wizardstate.State, in registry.Input) er
 	// wizard's committed-history recap would skip fields the user
 	// already filled in the TUI because they were never individually
 	// committed there (the TUI commits everything at submit time).
+	// Skip fields whose value is just a Default/Prefill seed — those
+	// should still prompt the user for confirmation.
 	for i := 0; i < state.Len(); i++ {
 		if state.Entry(i).Committed {
+			continue
+		}
+		if state.Entry(i).Defaulted {
+			continue
+		}
+		// Suggest fields always have a cursor position (and thus a
+		// non-empty Value) even if the user was just browsing. Only
+		// treat them as confirmed if explicitly Committed (above).
+		if state.Field(i).Suggest != nil {
 			continue
 		}
 		if !state.FieldVisible(i) {

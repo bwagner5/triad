@@ -59,6 +59,10 @@ type FieldEntry struct {
 	// does NOT clear the answer slots — that is the behavior that
 	// lets the user shift+tab back to fix a typo.
 	Committed bool
+	// Defaulted is true when Text was seeded from Default or Prefill
+	// rather than from explicit user input or CLI flags. UIs use this
+	// to distinguish placeholder defaults from confirmed values.
+	Defaulted bool
 }
 
 // HistoryEntry is a denormalized record for the CLI wizard's
@@ -111,8 +115,10 @@ func New(fields []registry.Field, in registry.Input) *State {
 		}
 		if f.Prefill != nil {
 			s.entries[i].Text = f.Prefill()
+			s.entries[i].Defaulted = true
 		} else if f.Default != nil {
 			s.entries[i].Text = sprintAny(f.Default)
+			s.entries[i].Defaulted = true
 		}
 	}
 	return s
@@ -331,6 +337,7 @@ func (s *State) SetText(idx int, v string) {
 		return
 	}
 	s.entries[idx].Text = v
+	s.entries[idx].Defaulted = false
 	s.cascadeFrom(idx)
 }
 
@@ -354,6 +361,7 @@ func (s *State) SetSelIdx(idx, sel int) bool {
 		return false
 	}
 	e.SelIdx = sel
+	e.Defaulted = false
 	s.cascadeFrom(idx)
 	return true
 }
@@ -366,6 +374,7 @@ func (s *State) ToggleMulti(idx, choiceIdx int) {
 		return
 	}
 	e := &s.entries[idx]
+	e.Defaulted = false
 	if e.MultiSel == nil {
 		e.MultiSel = map[int]bool{}
 	}
@@ -392,14 +401,20 @@ func (s *State) SetChoices(idx int, choices []registry.Choice) int {
 	e.ChoicesErr = nil
 
 	want := e.Text
+	fromDefault := false
 	if want == "" {
 		if v, ok := s.seed[f.Flag]; ok && v != "" {
 			want = v
 		} else if f.Prefill != nil {
 			want = f.Prefill()
+			fromDefault = true
 		} else if f.Default != nil {
 			want = sprintAny(f.Default)
+			fromDefault = true
 		}
+	}
+	if fromDefault && !e.Committed {
+		e.Defaulted = true
 	}
 	if want == "" {
 		s.cascadeFrom(idx)

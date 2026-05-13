@@ -97,7 +97,14 @@ func RunWith(ctx context.Context, reg *registry.Registry, opts Options, res *reg
 		return err
 	}
 	if fa, ok := final.(*app); ok && fa.backToCLI {
-		return &wizard.BackToCLI{State: state}
+		// Return the wizard overlay's live state (which reflects any
+		// edits or confirmations the user made in the TUI) rather than
+		// the original state parameter passed in.
+		liveState := state
+		if fa.wizard.state != nil {
+			liveState = fa.wizard.state
+		}
+		return &wizard.BackToCLI{State: liveState}
 	}
 	return nil
 }
@@ -744,6 +751,18 @@ func (a *app) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// Intercepted before any overlay so it works from the wizard
 	// overlay AND from the list view the row-action handoff lands on.
 	if key == "ctrl+t" && a.handoffOrigin {
+		// Mirror any in-flight typing from the wizard overlay's focused
+		// textinput into State before quitting, so the CLI wizard sees
+		// what the user typed.
+		if a.wizard.Active() && a.wizard.state != nil {
+			cur := a.wizard.state.Idx()
+			if cur >= 0 && cur < len(a.wizard.inputs) && !a.wizard.isSelect(cur) && !a.wizard.isFile(cur) {
+				v := a.wizard.inputs[cur].Value()
+				if v != "" || a.wizard.state.Entry(cur).Committed || a.wizard.touched[cur] {
+					a.wizard.state.SetText(cur, v)
+				}
+			}
+		}
 		a.backToCLI = true
 		return a, tea.Quit
 	}

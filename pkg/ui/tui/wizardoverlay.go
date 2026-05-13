@@ -37,6 +37,14 @@ type wizardOverlay struct {
 	// every keystroke so When predicates see in-flight text.
 	inputs  []textinput.Model
 	pickers []*filepicker.Model
+	// touched tracks whether the user has typed in each text field.
+	// Once touched, the widget value is authoritative over the state's
+	// Default/Prefill seed even when empty.
+	touched []bool
+	// handoff is true when the overlay was opened from a Ctrl+T switch
+	// with pre-existing state. Defaults are shown as placeholders
+	// instead of pre-filled values so the user can confirm them.
+	handoff bool
 
 	spin spinner.Model
 	// busy is true after submit() while we wait for the saga or next
@@ -75,6 +83,7 @@ func (wo *wizardOverlay) ShowWithState(ctx context.Context, res *registry.Resour
 	wo.op = op
 	wo.fields = fields
 	wo.input = input
+	wo.handoff = state != nil
 	if state != nil {
 		wo.state = state
 	} else {
@@ -86,6 +95,7 @@ func (wo *wizardOverlay) ShowWithState(ctx context.Context, res *registry.Resour
 	n := len(fields)
 	wo.inputs = make([]textinput.Model, n)
 	wo.pickers = make([]*filepicker.Model, n)
+	wo.touched = make([]bool, n)
 
 	var cmds []tea.Cmd
 	for i, f := range fields {
@@ -118,8 +128,13 @@ func (wo *wizardOverlay) ShowWithState(ctx context.Context, res *registry.Resour
 		// Suggest fields render via choices, not the textinput, so
 		// skip the SetValue call for them.
 		if f.Suggest == nil {
-			if seed := wo.state.Entry(i).Text; seed != "" {
-				ti.SetValue(seed)
+			entry := wo.state.Entry(i)
+			if entry.Text != "" {
+				if wo.handoff && entry.Defaulted && !entry.Committed {
+					ti.Placeholder = entry.Text
+				} else {
+					ti.SetValue(entry.Text)
+				}
 			}
 		}
 		wo.inputs[i] = ti
@@ -153,9 +168,11 @@ func (wo *wizardOverlay) ShowWithState(ctx context.Context, res *registry.Resour
 func (wo *wizardOverlay) Clear() {
 	wo.active = false
 	wo.busy = false
+	wo.handoff = false
 	wo.fields = nil
 	wo.inputs = nil
 	wo.pickers = nil
+	wo.touched = nil
 	wo.state = nil
 	wo.preamble = ""
 	wo.preambleScroll = 0
@@ -232,9 +249,14 @@ func (wo *wizardOverlay) fieldValue(i int) string {
 	if wo.isFile(i) && wo.pickers[i] != nil {
 		wo.state.SetFilePath(i, wo.pickers[i].Path)
 	}
-	// For text fields, the textinput is the source of truth — same.
+	// For text fields, the textinput is the source of truth — but only
+	// sync when non-empty, already committed, or user-touched, to avoid
+	// overwriting Default/Prefill seeds in state with an empty widget.
 	if !wo.isSelect(i) && !wo.isFile(i) && i < len(wo.inputs) {
-		wo.state.SetText(i, wo.inputs[i].Value())
+		v := wo.inputs[i].Value()
+		if v != "" || wo.state.Entry(i).Committed || wo.touched[i] {
+			wo.state.SetText(i, v)
+		}
 	}
 	return wo.state.Value(i)
 }
@@ -256,12 +278,16 @@ func (wo *wizardOverlay) fetchSuggest(idx int, f registry.Field) tea.Cmd {
 func (wo *wizardOverlay) focusField(i int) tea.Cmd {
 	// Mirror the departing field's widget value into State so When
 	// predicates see the latest typed/picked value when we re-evaluate
-	// visibility for downstream fields.
+	// visibility for downstream fields. Skip uncommitted fields with an
+	// empty widget to avoid clobbering Default/Prefill seeds in state.
 	if wo.state != nil {
 		cur := wo.state.Idx()
 		if cur >= 0 && cur < len(wo.fields) {
 			if !wo.isSelect(cur) && !wo.isFile(cur) && cur < len(wo.inputs) {
-				wo.state.SetText(cur, wo.inputs[cur].Value())
+				v := wo.inputs[cur].Value()
+				if v != "" || wo.state.Entry(cur).Committed || wo.touched[cur] {
+					wo.state.SetText(cur, v)
+				}
 			}
 			if wo.isFile(cur) && wo.pickers[cur] != nil {
 				wo.state.SetFilePath(cur, wo.pickers[cur].Path)
@@ -282,12 +308,17 @@ func (wo *wizardOverlay) focusField(i int) tea.Cmd {
 
 func (wo *wizardOverlay) submit() tea.Cmd {
 	// Mirror text/file widgets into State once before validation so any
-	// in-flight typing is included.
+	// in-flight typing is included. Skip uncommitted fields where the
+	// widget is empty — state already holds the Default/Prefill seed and
+	// overwriting it would lose the default the user implicitly accepted.
 	for i := range wo.fields {
 		if wo.isFile(i) && wo.pickers[i] != nil {
 			wo.state.SetFilePath(i, wo.pickers[i].Path)
 		} else if !wo.isSelect(i) && i < len(wo.inputs) && wo.inputs[i].Prompt != "" {
-			wo.state.SetText(i, wo.inputs[i].Value())
+			v := wo.inputs[i].Value()
+			if v != "" || wo.state.Entry(i).Committed || wo.touched[i] {
+				wo.state.SetText(i, v)
+			}
 		}
 	}
 	if first := wo.state.Submit(); first >= 0 {
@@ -416,6 +447,7 @@ func (wo *wizardOverlay) Update(msg tea.Msg) (bool, tea.Cmd) {
 	if cur < len(wo.inputs) && !wo.isSelect(cur) && !wo.isFile(cur) {
 		var cmd tea.Cmd
 		wo.inputs[cur], cmd = wo.inputs[cur].Update(msg)
+		wo.touched[cur] = true
 		wo.state.SetText(cur, wo.inputs[cur].Value())
 		return true, cmd
 	}
@@ -510,6 +542,10 @@ func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 				return nil
 			}
 			wo.state.Entry(cur).Err = ""
+			// Mark the field committed so its value renders as
+			// confirmed (not a muted default) and state syncs
+			// treat the widget as authoritative.
+			wo.state.Entry(cur).Committed = true
 			return wo.focusField(j)
 		}
 		return wo.submit()
@@ -560,6 +596,7 @@ func (wo *wizardOverlay) handleKey(msg tea.KeyPressMsg) tea.Cmd {
 	if cur < len(wo.inputs) {
 		var cmd tea.Cmd
 		wo.inputs[cur], cmd = wo.inputs[cur].Update(msg)
+		wo.touched[cur] = true
 		wo.state.SetText(cur, wo.inputs[cur].Value())
 		return cmd
 	}
@@ -691,6 +728,8 @@ func (wo *wizardOverlay) Box(w, h int) string {
 				}
 			} else if val == "" {
 				val = theme.MutedText.Render("—")
+			} else if wo.handoff && entry.Defaulted && !entry.Committed && !wo.isSelect(i) {
+				val = theme.MutedText.Render(val + " (default)")
 			}
 			body.WriteString("  " + label + "  " + val + "\n")
 			if entry.Err != "" {
