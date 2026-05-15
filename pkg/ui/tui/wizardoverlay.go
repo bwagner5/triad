@@ -223,13 +223,6 @@ func (wo *wizardOverlay) prevVisible(i int) int {
 	return wo.state.PrevVisible(i)
 }
 
-func (wo *wizardOverlay) firstVisible() int {
-	if wo.state == nil {
-		return -1
-	}
-	return wo.state.FirstVisible()
-}
-
 func (wo *wizardOverlay) lastVisible() int {
 	if wo.state == nil {
 		return -1

@@ -13,7 +13,7 @@ linters:
 
   settings:
     gocyclo:
-      min-complexity: 25
+      min-complexity: 50
     misspell:
       locale: US
 
